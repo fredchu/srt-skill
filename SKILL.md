@@ -211,7 +211,7 @@ cd /Users/fredchu/Documents/For_Claude/scripts/subtitle
 
 產出：`${VIDEO_DIR}/<檔名>.srt`（Breeze）或 `${VIDEO_DIR}/<檔名>_zh-TW.srt`（Whisper + OpenCC）
 
-`subtitle.sh` 內部還會自動執行 Step 4.5（`postprocess_srt.py`）：用 sherpa-onnx 模型恢復標點 + `terminology_rules.py` 術語校正，就地覆寫同一個 `.srt`。所以拿到的 SRT 已經過標點恢復，不是純 ASR 原始輸出。
+`subtitle.sh` 內部還會自動執行 Step 4.5（`postprocess_srt.py --no-punctuation`）：只做 `terminology_rules.py` 術語校正，不做標點恢復。ASR 輸出是無標點的純文字，標點由 Step 2b 的 LLM 在校正時一併加上（LLM 有完整語境，標點品質優於 sherpa-onnx 的局部標點模型）。
 
 這一步耗時最長（約影片長度的 0.05-0.1x），跑完後告知用戶 ASR 完成並繼續。
 
