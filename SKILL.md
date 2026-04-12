@@ -127,7 +127,8 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/srt_extract_slides.py" \
 - `<檔名>_slide_captions.json`：帶時間戳的 caption 陣列，格式 `[{time_s, caption, terms}, ...]`
 - `<檔名>_slide_terms.txt`：全局術語表（向下相容）
 
-腳本內部流程：ffmpeg 每 60 秒截一幀 → imagehash 去重 → Qwen3-VL-8B caption + 術語抽取 → JSON 輸出。
+腳本內部流程：ffmpeg 每 60 秒截一幀 → imagehash 去重 → VLM caption + 術語抽取 → JSON 輸出。
+預設使用 Gemma4:26b（Ollama vision，品質較高）。Ollama 不可用時 fallback 到 Qwen3-VL-8B（mlx-vlm）：`--model lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit`。
 
 在 Step 2b 組裝 prompt 時：
 - `_slide_terms.txt` 加在術語表後面（全局，與舊行為相同）
