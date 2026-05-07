@@ -120,18 +120,64 @@ for b in blocks:
             continue
     result.append(b)
 
-# 重新編號
-final_blocks = []
-seq = 1
+# 排序 + 去除跟既有條目時間範圍重疊的 patch 條目 + 刪除 < 300ms 的短條目
+# 原因：caller 通常傳含 ±2s buffer 的 HALL_START/HALL_END，Whisper 用 buffer 跑出
+# 的條目時間戳會跟 ASR 既有條目重疊，造成「短暫重疊」字幕
+def tc_to_ms(tc):
+    h, m, rest = tc.split(':'); s, ms = rest.split(',')
+    return int(h)*3600000 + int(m)*60000 + int(s)*1000 + int(ms)
+
+parsed = []
 for b in result:
     lines = b.strip().split('\n')
-    if len(lines) >= 2 and '-->' in lines[1]:
-        lines[0] = str(seq)
-        final_blocks.append('\n'.join(lines))
-        seq += 1
+    if len(lines) < 3 or '-->' not in lines[1]:
+        continue
+    m = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', lines[1])
+    if not m: continue
+    parsed.append({
+        'start': tc_to_ms(m.group(1)),
+        'end': tc_to_ms(m.group(2)),
+        'tc': lines[1],
+        'text': '\n'.join(lines[2:]),
+    })
+
+# Sort by start time
+parsed.sort(key=lambda x: x['start'])
+
+# Drop short (<300ms) entries — likely buffer-edge artefacts
+before_short = len(parsed)
+parsed = [e for e in parsed if e['end'] - e['start'] >= 300]
+dropped_short = before_short - len(parsed)
+
+# Clamp end to next.start to prevent any residual overlap
+clamped = 0
+for i in range(len(parsed) - 1):
+    if parsed[i]['end'] > parsed[i+1]['start']:
+        parsed[i]['end'] = parsed[i+1]['start']
+        clamped += 1
+
+# Drop entries that became zero/negative duration after clamp
+before_collapsed = len(parsed)
+parsed = [e for e in parsed if e['end'] - e['start'] >= 300]
+dropped_collapsed = before_collapsed - len(parsed)
+dropped_short += dropped_collapsed
+
+# Re-emit
+final_blocks = []
+for i, e in enumerate(parsed):
+    s_ms = e['start']; e_ms = e['end']
+    def ms_fmt(ms):
+        h = ms // 3600000; ms %= 3600000
+        m = ms // 60000; ms %= 60000
+        s = ms // 1000; mss = ms % 1000
+        return f'{h:02d}:{m:02d}:{s:02d},{mss:03d}'
+    final_blocks.append(f'{i+1}\n{ms_fmt(s_ms)} --> {ms_fmt(e_ms)}\n{e["text"]}')
+seq = len(parsed) + 1
 
 with open(SRT_FILE, 'w') as f:
     f.write('\n\n'.join(final_blocks) + '\n')
+if dropped_short or clamped:
+    print(f'  Sort+cleanup: dropped {dropped_short} short(<300ms), clamped {clamped} overlap')
 print(f'Patched: 刪除 {removed} 條幻覺，插入 {len(new_entries)} 條，總計 {seq-1} 條')
 "
 
