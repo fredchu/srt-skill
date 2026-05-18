@@ -45,6 +45,7 @@ ${SUBTITLE_DIR}/
 │   ├── srt_correct_prompt.txt           # LLM system prompt
 │   ├── srt_preprocess.py                # Step 2a: 機械性預處理
 │   ├── srt_postprocess.py               # Step 2c: 後處理（強制拆句等）
+│   ├── srt_strip_commentary.py          # Step 2c: 清掉複查 subagent 殘留的判斷文字
 │   └── terms_austin_v2.txt              # 講者術語表
 ```
 
@@ -715,12 +716,19 @@ done
 - 專有名詞、人名、地名、作品名、時事用語 — 即使你不認識也不要改，講者可能在引用你不知道的時事、作品、流行語
 - 語意通順、在上下文中說得通的條目
 
-## 輸出格式
+## 輸出格式（嚴格）
 只輸出需要修改的條目，格式：
 原始時間軸
 校正後文字
 
-如果該條目沒問題，不要輸出。
+**絕對禁止**：
+- 輸出判斷說明，例如 `[通順，不改]`、`[備註：...]`、`[確認：...]`、`→`、「原文通順」、「不改」、「請確認語境」、「應是...」、「若上條...」、「但後文...」
+- 輸出多行判斷邏輯（一條目對應一行純字幕，禁止把推理過程當字幕第二行）
+- 輸出未閉合的引號、括號或方括號（`「`、`[` 必須在同一行完成配對）
+- 輸出「無修改」「OK」這類佔位文字
+
+如果該條目沒問題，**完全不輸出**（連時間軸都不要列）。
+「校正後文字」必須是純字幕內容，不含任何符號標記、推理文字或內部判斷。
 '''
 
    with open(f'{WORK_DIR}/_review_prompt.txt', 'w') as f:
@@ -810,13 +818,18 @@ done
        f.write('\n\n'.join(result) + '\n')
    print(f'Applied {applied} review fixes, saved to {output}')
    " && \
+   # Strip commentary 殘留（複查 subagent 偶爾會把判斷文字當字幕寫入，必須在 postprocess force-split 之前清掉，
+   # 否則 split 後 commentary 會被切成多塊 chunk 污染數倍 block）
+   python3 "${CORRECT_DIR}/srt_strip_commentary.py" "<_2c_reviewed.srt>" && \
    # --ref 只在雲端模式使用（還原被 Sonnet 捏造的時間軸）
    # 本地模式不加 --ref（local LLM 保留原始時間軸，加 --ref 反而會破壞）
    if [ "$LOCAL_MODE" = "true" ]; then
        python3 "${CORRECT_DIR}/srt_postprocess.py" "<_2c_reviewed.srt>" "<最終輸出路徑>_2c_final.srt" --stats
    else
        python3 "${CORRECT_DIR}/srt_postprocess.py" "<_2c_reviewed.srt>" "<最終輸出路徑>_2c_final.srt" --stats --ref "<preprocessed SRT 路徑>"
-   fi
+   fi && \
+   # 第二層保險：postprocess 後再掃一次（含 Type B/C 啟發法，處理 split 殘留）
+   python3 "${CORRECT_DIR}/srt_strip_commentary.py" "<最終輸出路徑>_2c_final.srt"
    ```
 
 ### Step 3: 術語自動學習（每次必跑）
