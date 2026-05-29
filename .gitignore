@@ -1,0 +1,19 @@
+# 環境與產物（不進 repo）
+scripts/.venv
+.venv
+__pycache__/
+*.pyc
+.DS_Store
+# 媒體與工作產物（留在 user workspace，不進 skill repo）
+media/
+.subtitle_team_workspace/
+# 字幕中間產物
+_seg_*.srt
+_ctx_*.txt
+_vv_ref_*.txt
+_caption_ref_*.txt
+_review_seg_*
+_system_prompt.txt
+_review_prompt.txt
+# codex-dispatch run artifacts
+.codex-dispatch/
