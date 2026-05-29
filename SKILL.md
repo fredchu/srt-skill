@@ -64,7 +64,7 @@ ${SUBTITLE_DIR}/
 其他參數：
 - **ASR 模式**：預設 Breeze（`--breeze`）。用戶提到 whisper / 英文內容 / 非中文 → 用 Whisper（不加 `--breeze`）
 - **術語表**：預設 `terms_austin_v2.txt`。用戶指定其他講者 → 尋找對應術語表
-- **投影片文字**：用戶提供投影片文字檔（.txt）→ 啟用 Step 0.5 抽取本集術語
+- **投影片文字**：用戶提供投影片檔（.txt 純文字，或 .pptx/.ppt PowerPoint）→ 啟用 Step 0.5 抽取本集術語
 - **特殊要求**：`--learn`（術語學習）、`--bilingual`（雙語輸出）
 - **LLM 模式**：預設 Sonnet subagent（雲端）。用戶提到 `--local` / 「用本地」/ 「離線」→ 用 Ollama gemma4:26b。需要 Ollama 已啟動且 gemma4:26b 已拉取
 
@@ -113,7 +113,12 @@ mv "<原始路徑>" "${VIDEO_DIR}/"
 
 **執行時機**：Step 1（ASR）和 Step 1'（VV）都完成後、Step 2a 之前或之後。不可與 ASR 平行（都吃 MLX GPU）。
 
-**如果用戶提供了投影片文字檔**（.txt），跳過自動擷取，直接用用戶的檔案作為全局術語表（舊行為）。
+**如果用戶提供了投影片檔**，跳過自動擷取，直接用該檔作為全局術語表（舊行為）：
+- `.txt`（純文字）→ 直接當術語表用
+- `.pptx` / `.ppt`（PowerPoint）→ 用 `srt_extract_slides.py` 直接抽文字（遞迴 group/table/text_frame + 備註，去重），跳過 ffmpeg/dedup/VLM：
+  ```bash
+  python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pptx>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt"
+  ```
 
 **自動擷取**（無投影片文字檔時）：
 
