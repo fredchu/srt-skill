@@ -806,10 +806,15 @@ done
            continue
        blocks = re.split(r'\n\n+', content)
        for b in blocks:
-           lines = b.strip().split('\n')
-           if len(lines) >= 2 and '-->' in lines[0]:
-               tc = lines[0].strip()
-               text = '\n'.join(lines[1:])
+           lines = [l for l in b.strip().split('\n') if l.strip()]
+           # 容忍前置序號行：subagent 偶爾在時間軸前多寫一行序號（如 \"833\"）。
+           # 找含 '-->' 的那行當時間軸，不要假設它是 lines[0]，否則該修正會被靜默漏套。
+           tc_idx = next((i for i, l in enumerate(lines) if '-->' in l), None)
+           if tc_idx is None:
+               continue
+           tc = lines[tc_idx].strip()
+           text = '\n'.join(lines[tc_idx + 1:]).strip()
+           if text:
                fixes[tc] = text
 
    # 套用修正到 corrected_raw

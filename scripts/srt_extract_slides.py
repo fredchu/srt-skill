@@ -2,7 +2,7 @@
 """
 srt_extract_slides.py — Extract terminology from video slide screenshots.
 
-Pipeline: ffmpeg frame extraction → perceptual hash dedup → Qwen2.5-VL OCR → terms file
+Pipeline: ffmpeg frame extraction → perceptual hash dedup → gemma4:26b VLM (Ollama) → terms file
 
 Usage:
     python3 srt_extract_slides.py <video_file> [--output <terms_file>] [--interval 60] [--model <model_name>]
