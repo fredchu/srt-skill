@@ -126,3 +126,64 @@ class TestPunctuationWithMock:
         result = parse_srt(str(out))
         assert "你好" in result[0]["text"]
         engine.add_punctuation.assert_called_once()
+
+
+class TestSrtCorrectPostprocessTermsCli:
+    """Test --terms for scripts/srt_correct/srt_postprocess.py."""
+
+    def test_terms_path_protects_split_terms(self, tmp_path):
+        import subprocess
+        import sys
+
+        script = Path(__file__).resolve().parents[1] / "scripts" / "srt_correct" / "srt_postprocess.py"
+        srt = tmp_path / "in.srt"
+        srt.write_text(textwrap.dedent("""\
+            1
+            00:00:01,000 --> 00:00:03,000
+            使用 Open
+
+            2
+            00:00:03,000 --> 00:00:05,000
+            AI 很方便
+        """), encoding="utf-8")
+        out = tmp_path / "out.srt"
+        terms = tmp_path / "terms.txt"
+        terms.write_text("OpenAI\n", encoding="utf-8")
+
+        proc = subprocess.run(
+            [sys.executable, str(script), str(srt), str(out), "--terms", str(terms)],
+            text=True,
+            capture_output=True,
+        )
+
+        assert proc.returncode == 0
+        result = out.read_text(encoding="utf-8")
+        assert "使用 OpenAI" in result
+        assert "AI 很方便" not in result
+
+    def test_missing_terms_path_warns_and_does_not_crash(self, tmp_path):
+        import subprocess
+        import sys
+
+        script = Path(__file__).resolve().parents[1] / "scripts" / "srt_correct" / "srt_postprocess.py"
+        srt = tmp_path / "in.srt"
+        srt.write_text(textwrap.dedent("""\
+            1
+            00:00:01,000 --> 00:00:03,000
+            使用 Open
+
+            2
+            00:00:03,000 --> 00:00:05,000
+            AI 很方便
+        """), encoding="utf-8")
+        out = tmp_path / "out.srt"
+
+        proc = subprocess.run(
+            [sys.executable, str(script), str(srt), str(out), "--terms", str(tmp_path / "missing.txt")],
+            text=True,
+            capture_output=True,
+        )
+
+        assert proc.returncode == 0
+        assert "WARNING" in proc.stderr
+        assert out.exists()

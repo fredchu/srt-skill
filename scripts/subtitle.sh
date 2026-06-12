@@ -262,7 +262,7 @@ fi
 sed -i '' '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9],/! s/,/，/g' "$SRT_CN"
 
 STEP_ELAPSED=$((SECONDS - STEP_START))
-LINES=$(grep -c "^[0-9]" "$SRT_CN" 2>/dev/null || echo "?")
+LINES=$(grep -cE '^[0-9]+$' "$SRT_CN" 2>/dev/null || echo "?")
 print_success "語音辨識完成（$(format_duration $STEP_ELAPSED)）"
 echo "    字幕段數：$LINES 段"
 

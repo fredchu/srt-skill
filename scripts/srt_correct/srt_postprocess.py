@@ -10,7 +10,7 @@ srt_postprocess.py — LLM 校正後的驗證和修復
   4. 產出品質報告（含仍超長條目數，供人工檢視）
 
 用法:
-    python3 srt_postprocess.py input.srt [output.srt] [--stats] [--ref preprocessed.srt]
+    python3 srt_postprocess.py input.srt [output.srt] [--stats] [--ref preprocessed.srt] [--terms terms.txt]
 """
 
 import re
@@ -367,6 +367,7 @@ def main():
     args = sys.argv[1:]
     show_stats = "--stats" in args
     ref_path = None
+    terms_path = None
     clean_args = []
     i = 0
     while i < len(args):
@@ -377,12 +378,16 @@ def main():
             ref_path = args[i + 1]
             i += 2
             continue
+        if args[i] == "--terms" and i + 1 < len(args):
+            terms_path = args[i + 1]
+            i += 2
+            continue
         clean_args.append(args[i])
         i += 1
     args = clean_args
 
     if not args:
-        print("用法: python3 srt_postprocess.py input.srt [output.srt] [--stats] [--ref preprocessed.srt]", file=sys.stderr)
+        print("用法: python3 srt_postprocess.py input.srt [output.srt] [--stats] [--ref preprocessed.srt] [--terms terms.txt]", file=sys.stderr)
         sys.exit(1)
 
     input_path = args[0]
@@ -413,7 +418,7 @@ def main():
 
     # Pass 1: 術語保護 — 偵測術語被切到相鄰字幕，合回正確的那條
     term_merge_count = 0
-    terms_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "terms_austin_v2.txt")
+    terms_file = terms_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "terms_austin_v2.txt")
     if os.path.exists(terms_file):
         terms = set()
         for line in open(terms_file, encoding='utf-8'):
@@ -463,6 +468,8 @@ def main():
 
         # 清除空條目
         new_entries = [e for e in new_entries if e["text"].strip()]
+    else:
+        print(f"WARNING: terms file not found, skipping terminology protection: {terms_file}", file=sys.stderr)
 
     # Pass 2: 去除時間軸重疊的重複條目（時間軸+文字都相似才去重）
     dedup_count = 0

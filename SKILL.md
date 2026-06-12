@@ -24,7 +24,8 @@ YouTube 連結 或 本地影片/音檔
 原始 SRT (.srt) + VV JSON
   ↓ Step 1.5: srt_hallucination_fix.py (幻覺偵測+自動修復)
   ↓ Step 2a: srt_preprocess.py → _2a_preprocessed.srt
-  ↓ Step 2b: Agent subagent (Sonnet) 逐段校正 + VV 交叉參考 → _2b_corrected.srt
+  ↓ Step 2b: Agent subagent (Sonnet) 逐段校正 + VV 交叉參考
+  ↓         srt_merge_segments.py 合併（內建條數/時長 gate，fail 自動重派）→ _2b_corrected.srt
   ↓ Step 2c: 複查 + srt_postprocess.py → _2c_reviewed.srt → _2c_final.srt
   ↓ Step 3: 術語學習
 術語表自動成長
@@ -45,13 +46,27 @@ TERMS=${DATA_DIR}/srt_correct/terms_austin_v2.txt
 
 ${SUBTITLE_DIR}/
 ├── subtitle.sh                          # Step 1: ASR
+├── vv_longaudio.py                      # Step 1': VV 長音檔自動切段+合併（含 GPU flock）
 ├── srt_correct/
 │   ├── srt_correct_prompt.txt           # LLM system prompt
 │   ├── srt_preprocess.py                # Step 2a: 機械性預處理
-│   ├── srt_postprocess.py               # Step 2c: 後處理（強制拆句等）
+│   ├── srt_prepare_segments.py          # Step 2b: 切分 + system prompt 組裝 + VV/caption ref
+│   ├── srt_merge_segments.py            # Step 2b: 合併 + 結構性品質 gate + metrics
+│   ├── srt_postprocess.py               # Step 2c: 後處理（強制拆句等，--terms 指向 DATA_DIR）
 │   ├── srt_strip_commentary.py          # Step 2c: 清掉複查 subagent 殘留的判斷文字
+│   ├── srt_learn_terms.py               # Step 3: 術語學習（diff 統計 + 已收錄判斷）
 │   └── terms_austin_v2.txt              # 講者術語表實際位於 ${DATA_DIR}/srt_correct/
 ```
+
+## GPU 資源互斥表（MLX / Apple Silicon）
+
+| 組合 | 可否並行 |
+|------|---------|
+| Breeze ASR + VibeVoice | ✅ 可（skill 標準平行組合） |
+| 兩個 VibeVoice instance | ❌ 不可（vv_longaudio.py 內建 flock 鎖強制序列） |
+| 兩部影片同時跑 ASR（2×Breeze+2×VV） | ❌ 不可 — 多影片時 ASR 階段逐部排隊，前一部進入 Step 2 後下一部才開始 ASR |
+| VLM caption（Step 0.5）+ 任一 ASR | ❌ 不可（Step 0.5 必須等 ASR 全部完成） |
+| Step 2b/2c subagent（雲端）+ 任何本地 GPU 工作 | ✅ 可 |
 
 ## 執行步驟
 
@@ -100,9 +115,9 @@ yt-dlp -f "bestvideo[height<=1080]+bestaudio/best" \
   "<YouTube URL>"
 ```
 
-本地檔案的處理：把影片/音檔搬進 `${VIDEO_DIR}`（如果已經在裡面就不用搬）：
+本地檔案的處理：把影片/音檔複製進 `${VIDEO_DIR}`（如果已經在裡面就不用；用 cp 不用 mv，不動用戶原檔）：
 ```bash
-mv "<原始路徑>" "${VIDEO_DIR}/"
+cp "<原始路徑>" "${VIDEO_DIR}/"
 ```
 
 說明：
@@ -159,45 +174,23 @@ cd "${VIDEO_DIR}" && python3 /Users/fredchu/dev/vibevoice-poc/vibevoice_asr.py \
     --output "${VIDEO_DIR}/<檔名>_vibevoice.srt"
 ```
 
-**長音檔（> 55 分鐘）— 切段跑再合併 JSON：**
+**長音檔（> 55 分鐘）— 用 `vv_longaudio.py` 自動切段：**
 
-`mlx_audio` 套件硬限制 59 分鐘（`MAX_DURATION_SECONDS = 59 * 60`），超過會自動 trim 截斷。用 ffmpeg 在靜音點切段，每段 ≤ 50 分鐘（留安全餘量），各自跑 VV 再合併 JSON（時間戳偏移對齊）：
+`mlx_audio` 套件硬限制 59 分鐘（`MAX_DURATION_SECONDS = 59 * 60`），超過會自動 trim 截斷。`vv_longaudio.py` 自動完成：ffprobe 時長偵測 → silencedetect 選切點（每段 ≤ 50 分鐘）→ 切 wav → 序列跑 VV（內建 flock GPU 鎖，防兩個 VV 同跑）→ JSON 時間戳偏移合併 → 清理 part 暫存檔：
 
 ```bash
-# 1. 偵測靜音點，在最接近 45 分鐘倍數的靜音處切段
-ffmpeg -i "${VIDEO_DIR}/<影片或音檔名>" -af silencedetect=noise=-30dB:d=0.5 -f null - 2>&1 | grep silence_end
-
-# 2. 每段各自跑 VV（序列，不可平行——會搶 GPU 記憶體）
-cd "${VIDEO_DIR}" && python3 /Users/fredchu/dev/vibevoice-poc/vibevoice_asr.py \
-    "${VIDEO_DIR}/<檔名>_part1.wav" \
+cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/vv_longaudio.py" \
+    "${VIDEO_DIR}/<影片或音檔名>" \
     --terms "${TERMS}" --terms-max 50 \
-    --json --output "${VIDEO_DIR}/<檔名>_vv_part1.srt"
-# ... 同理 part2, part3, ...
-
-# 3. 合併 JSON：偏移每段的 Start/End 時間戳
-python3 -c "
-import json, sys
-offset = 0.0
-merged = []
-for i in range(1, int(sys.argv[1]) + 1):
-    segs = json.load(open(f'${VIDEO_DIR}/<檔名>_vv_part{i}_vibevoice.json'))
-    for s in segs:
-        for key in ['Start', 'start', 'start_time']:
-            if key in s: s[key] = float(s[key]) + offset
-        for key in ['End', 'end', 'end_time']:
-            if key in s: s[key] = float(s[key]) + offset
-    merged.extend(segs)
-    # offset = 該段結束時間（從 ffmpeg 切段記錄取得）
-    if segs:
-        offset = max(float(s.get('End', s.get('end', s.get('end_time', 0)))) for s in segs)
-json.dump(merged, open('${VIDEO_DIR}/<檔名>_vibevoice.json', 'w'), ensure_ascii=False, indent=2)
-print(f'Merged {len(merged)} segments')
-" <段數>
+    --output-json "${VIDEO_DIR}/<檔名>_vibevoice.json" \
+    --output-srt "${VIDEO_DIR}/<檔名>_vibevoice.srt"
 ```
+
+先加 `--dry-run` 可只看切段計畫（JSON 印出 parts 與切點）不執行推理。
 
 產出：
 - `<檔名>_vibevoice.srt` — VV 的 SRT（備用）
-- `<檔名>_vibevoice.json` — VV 的 segments JSON（Step 2b 用），欄位格式：`Start`/`End`/`Content`/`Speaker`
+- `<檔名>_vibevoice.json` — VV 的 segments JSON（Step 2b 用），欄位可能是 `Start`/`End`/`Content` 或小寫 `start`/`end`/`text`（兩種都要支援，下游腳本已處理）
 
 注意：
 - 如果 VV 執行失敗（模型未安裝等），pipeline 繼續跑，Step 2b 跳過 VV 參考
@@ -277,172 +270,19 @@ python3 "${CORRECT_DIR}/srt_preprocess.py" "<ASR 產出的 SRT>" "<輸出路徑>
 
 > **Context 節約原則**：主 agent 不讀 SRT 內容到自己的 context。切分、prompt 組裝全部在 disk 上用腳本完成，subagent 自己讀檔案。
 
-1. **用 Python 腳本一次完成切分 + prompt 組裝**：
+1. **跑 `srt_prepare_segments.py` 完成切分 + prompt 組裝**（不要用 Read 工具讀 SRT 檔案）：
 
-   在 Bash 中執行以下 Python 腳本（不要用 Read 工具讀 SRT 檔案）：
-
-   ```python
-   python3 -c "
-   import re, os, json
-
-   CORRECT_DIR = '${CORRECT_DIR}'
-   TERMS = '${TERMS}'
-   WORK_DIR = '<工作目錄>'
-   SRT_FILE = '<preprocessed SRT 路徑>'
-   SLIDE_TERMS = '<投影片術語路徑或空字串>'  # 沒有就留空
-   VV_JSON = '<VV JSON 路徑或空字串>'  # Step 1' 產出的 _vibevoice.json，沒有就留空
-   CAPTIONS_JSON = '<caption JSON 路徑或空字串>'  # Step 0.5 產出的 _slide_captions.json，沒有就留空
-
-   # 讀取 prompt 模板和術語表
-   prompt = open(f'{CORRECT_DIR}/srt_correct_prompt.txt').read()
-   terms = open(TERMS).read()
-
-   # 組裝術語區塊
-   term_section = terms
-   if SLIDE_TERMS and os.path.exists(SLIDE_TERMS):
-       slide = open(SLIDE_TERMS).read()
-       term_section += '\n\n## 本集投影片術語\n' + slide
-
-   system_prompt = prompt.replace('{{TERMINOLOGY_SECTION}}', term_section)
-
-   # 如果有 VV JSON，在 system prompt 末尾加 VV 交叉參考 section
-   vv_segments = []
-   if VV_JSON and os.path.exists(VV_JSON):
-       vv_segments = json.load(open(VV_JSON))
-       system_prompt += '''
-
-## 交叉參考：VibeVoice ASR
-
-以下每段字幕會附帶另一個 ASR 引擎（VibeVoice，有 hotwords 注入）對同一段音檔的辨識結果。
-VibeVoice 的英文專有名詞和部分中文財經術語辨識較準確，但語氣詞過多。
-
-使用規則：
-1. 英文 ticker / 專有名詞（如 ETF 代碼）→ 以 VibeVoice 版本為準
-2. 中文財經術語 → 如果 VibeVoice 的詞彙更合理且語境正確，採用之
-3. 語氣詞（哦、呃、嗯）→ 忽略 VibeVoice 多出的部分
-4. 已知 VibeVoice 錯誤（不要採用）：
-   - 「值信」「指信」應為「質性」
-   - 「MOT」應為「MOAT」
-   - 「SHD」應為「SPHD」
-   - 「KVW」應為「KWEB」
-   - 「BOZ」應為「BOTZ」
-   - 「QILD」應為「QYLD」
-   - 「XILP」應為「XLP」
-   - 「SkyYY」應為「SKYY」
-5. 不確定時 → 保留 Breeze（主 ASR）的版本
-
-VibeVoice 參考文字會寫在每段的 _vv_ref_<N>.txt 檔案中。
-'''
-       print(f'VV JSON loaded: {len(vv_segments)} segments')
-
-   # 如果有 Caption JSON，在 system prompt 末尾加畫面描述 section
-   captions = []
-   if CAPTIONS_JSON and os.path.exists(CAPTIONS_JSON):
-       captions = json.load(open(CAPTIONS_JSON))
-       system_prompt += '''
-
-## 畫面截圖描述（帶時間戳）
-
-以下每段字幕會附帶影片畫面的 VLM 描述，標示了該時間點畫面顯示的內容（投影片、圖表、人物等）。
-
-使用規則：
-1. 畫面描述中的英文術語/ticker/人名 → 以畫面為準（這是 ground truth）
-2. 如果 ASR 文字跟畫面描述的術語不一致 → 優先信任畫面
-3. 畫面描述提供語境，幫助判斷同音字校正方向
-
-畫面描述會寫在每段的 _caption_ref_<N>.txt 檔案中。
-'''
-       print(f'Captions JSON loaded: {len(captions)} entries')
-
-   # 寫出 system prompt
-   with open(f'{WORK_DIR}/_system_prompt.txt', 'w') as f:
-       f.write(system_prompt)
-
-   # 切分 SRT
-   content = open(SRT_FILE).read()
-   blocks = re.split(r'\n\n+', content.strip())
-   SEG_SIZE = 300
-   segments = []
-   for i in range(0, len(blocks), SEG_SIZE):
-       segments.append(blocks[i:i+SEG_SIZE])
-
-   # 輔助函數：從 SRT block 提取時間戳（毫秒）
-   def parse_srt_time_ms(block):
-       lines = block.strip().split('\n')
-       if len(lines) >= 2 and '-->' in lines[1]:
-           tc = lines[1].strip()
-           parts = tc.split(' --> ')
-           def to_ms(t):
-               h, m, rest = t.split(':')
-               s, ms = rest.split(',')
-               return int(h)*3600000 + int(m)*60000 + int(s)*1000 + int(ms)
-           return to_ms(parts[0]), to_ms(parts[1])
-       return None, None
-
-   # 輔助函數：提取 VV 參考文字
-   def extract_vv_reference(seg_start_ms, seg_end_ms):
-       parts = []
-       for seg in vv_segments:
-           vv_start = float(seg.get('Start', seg.get('start', seg.get('start_time', 0)))) * 1000
-           vv_end = float(seg.get('End', seg.get('end', seg.get('end_time', 0)))) * 1000
-           if vv_end > seg_start_ms and vv_start < seg_end_ms:
-               text = seg.get('Content', seg.get('text', '')).strip()
-               if text and text != '[Silence]':
-                   parts.append(text)
-       return '\n'.join(parts)
-
-   # 寫出每段 + 上文參考 + VV 參考
-   for idx, seg in enumerate(segments):
-       with open(f'{WORK_DIR}/_seg_{idx}.srt', 'w') as f:
-           f.write('\n\n'.join(seg) + '\n')
-       # 上文參考：前一段最後 5 條的純文字
-       if idx > 0:
-           prev_blocks = segments[idx-1][-5:]
-           ctx_lines = []
-           for b in prev_blocks:
-               lines = b.strip().split('\n')
-               text_lines = [l for l in lines[2:] if not re.match(r'\d+:\d+:\d+', l)]
-               ctx_lines.extend(text_lines)
-           with open(f'{WORK_DIR}/_ctx_{idx}.txt', 'w') as f:
-               f.write('\n'.join(ctx_lines))
-       # VV 參考：從 VV segments 提取時間重疊的文字
-       if vv_segments:
-           first_start, _ = parse_srt_time_ms(seg[0])
-           _, last_end = parse_srt_time_ms(seg[-1])
-           if first_start is not None and last_end is not None:
-               vv_ref = extract_vv_reference(first_start, last_end)
-               with open(f'{WORK_DIR}/_vv_ref_{idx}.txt', 'w') as f:
-                   f.write(vv_ref if vv_ref else 'NO_VV_REFERENCE')
-           else:
-               with open(f'{WORK_DIR}/_vv_ref_{idx}.txt', 'w') as f:
-                   f.write('NO_VV_REFERENCE')
-       # Caption 參考：從 captions 提取時間重疊的畫面描述
-       if captions:
-           first_start, _ = parse_srt_time_ms(seg[0])
-           _, last_end = parse_srt_time_ms(seg[-1])
-           if first_start is not None and last_end is not None:
-               seg_caps = []
-               for c in captions:
-                   cap_ms = c['time_s'] * 1000
-                   if first_start - 30000 <= cap_ms <= last_end + 30000:
-                       m, s = divmod(int(c['time_s']), 60)
-                       seg_caps.append(f'[{m:02d}:{s:02d}] {c["caption"]}')
-                       if c.get('terms'):
-                           seg_caps.append(f'        術語: {", ".join(c["terms"])}')
-               with open(f'{WORK_DIR}/_caption_ref_{idx}.txt', 'w') as f:
-                   f.write('\n'.join(seg_caps) if seg_caps else 'NO_CAPTIONS')
-           else:
-               with open(f'{WORK_DIR}/_caption_ref_{idx}.txt', 'w') as f:
-                   f.write('NO_CAPTIONS')
-
-   print(f'Total blocks: {len(blocks)}')
-   print(f'Number of segments: {len(segments)}')
-   for i, s in enumerate(segments):
-       print(f'  Segment {i}: {len(s)} blocks')
-   if vv_segments:
-       print(f'VV reference files written for {len(segments)} segments')
-   "
+   ```bash
+   python3 "${CORRECT_DIR}/srt_prepare_segments.py" "<preprocessed SRT 路徑>" \
+       --workdir "${VIDEO_DIR}" \
+       --prompt-template "${CORRECT_DIR}/srt_correct_prompt.txt" \
+       --terms "${TERMS}" \
+       --slide-terms "<投影片術語路徑，沒有就省略此參數>" \
+       --vv-json "<VV JSON 路徑，沒有就省略此參數>" \
+       --captions-json "<caption JSON 路徑，沒有就省略此參數>"
    ```
+
+   stdout 會印 JSON summary：`{"total_blocks": N, "segments": [...], "vv_segments": N, "captions": N}`。
 
    這個腳本產出：
    - `_system_prompt.txt`：組裝好的完整 system prompt（含 VV 交叉參考規則 + 畫面描述規則，如有）
@@ -477,6 +317,7 @@ VibeVoice 參考文字會寫在每段的 _vv_ref_<N>.txt 檔案中。
    7. 用 Write 工具把校正結果寫入：<工作目錄>/_seg_<N>_corrected.srt
 
    重要：
+   - **保持逐條對應：輸出條數必須 ≥ 原始條數的 90%。禁止把多條字幕合併成一條長字幕**。只有「整條只有單一語氣詞」（如「然後」「所以」「這個」）的條目才可刪除或併入相鄰條目
    - 上文參考僅供理解語境，不要輸出這些內容
    - VibeVoice 參考僅供交叉比對，不要直接複製其語氣詞
    - 畫面描述中的英文術語是 ground truth，優先信任
@@ -486,7 +327,7 @@ VibeVoice 參考文字會寫在每段的 _vv_ref_<N>.txt 檔案中。
 
    **重要**：所有 Agent 呼叫必須在**同一個訊息**中發出，才能真正平行執行。
 
-   **驗證**：subagent 完成後，主 agent 檢查 `_seg_<N>_corrected.srt` 檔案是否存在且包含 SRT 時間軸格式。如果沒有，重試。
+   **驗證**：subagent 完成後不需逐檔人工抽查 — 第 3 步的合併腳本內建結構性品質 gate（條數比例 + 超長時長），會自動擋下過度合併。檔案不存在或無時間軸格式時 gate 也會以 ratio=0 觸發。
 
 #### Step 2b 替代路徑：本地 LLM（--local 模式）
 
@@ -524,139 +365,25 @@ done
 - 速度：每 300 blocks 約 30-60 秒（vs Sonnet 平行 ~10 秒），總時間較長但免費
 - 如果 Ollama 回傳 error，印 WARNING 並 fallback 到 Sonnet subagent（該段）
 
-3. **合併**：用 Python 腳本合併所有段的校正結果（不要讀入主 context）：
+3. **跑 `srt_merge_segments.py` 合併（內建結構性品質 gate）**：
 
-   ```python
-   python3 -c "
-   import re, glob
-
-   WORK_DIR = '<工作目錄>'
-   files = sorted(glob.glob(f'{WORK_DIR}/_seg_*_corrected.srt'),
-                  key=lambda f: int(re.search(r'_seg_(\d+)', f).group(1)))
-
-   def ts_to_ms(ts):
-       h, m, rest = ts.split(':')
-       s, ms_part = rest.replace('.', ',').split(',')
-       return int(h)*3600000 + int(m)*60000 + int(s)*1000 + int(ms_part)
-
-   merged = []
-   for fpath in files:
-       content = open(fpath).read().strip()
-       blocks = re.split(r'\n\n+', content)
-       for block in blocks:
-           lines = block.strip().split('\n')
-           # 嚴格驗證 SRT 結構：至少 3 行、第二行必須有 -->
-           if len(lines) < 3 or '-->' not in lines[1]:
-               continue
-           # 修復雙行重複：local LLM 可能輸出原文+校正兩行
-           text_lines = lines[2:]
-           if len(text_lines) > 1:
-               # 如果兩行幾乎相同（只差標點），保留較長的那行
-               from difflib import SequenceMatcher
-               for i in range(len(text_lines) - 1, 0, -1):
-                   ratio = SequenceMatcher(None, text_lines[i-1], text_lines[i]).ratio()
-                   if ratio > 0.7:
-                       # 保留較長的（通常是有標點的校正版）
-                       keep = text_lines[i] if len(text_lines[i]) >= len(text_lines[i-1]) else text_lines[i-1]
-                       text_lines = text_lines[:i-1] + [keep] + text_lines[i+1:]
-           lines = lines[:2] + text_lines
-           merged.append('\n'.join(lines))
-
-   # 按時間軸排序（修復 local LLM 輸出亂序問題）
-   def sort_key(block_str):
-       lines = block_str.split('\n')
-       ts_m = re.match(r'(\d{2}:\d{2}:\d{2}[,.]\d{3})', lines[1])
-       return ts_to_ms(ts_m.group(1)) if ts_m else 0
-   merged.sort(key=sort_key)
-
-   def ms_to_ts(ms):
-       h = ms // 3600000; ms %= 3600000
-       m = ms // 60000; ms %= 60000
-       s = ms // 1000; frac = ms % 1000
-       return f'{h:02d}:{m:02d}:{s:02d},{frac:03d}'
-
-   # Clamp end time：local LLM 常把 end time 寫錯（duration 暴增 60-240 秒）
-   # 規則：如果 end > 下一條 start，clamp 到下一條 start
-   for i in range(len(merged) - 1):
-       lines_a = merged[i].split('\n')
-       lines_b = merged[i+1].split('\n')
-       ts_a = re.match(r'(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})', lines_a[1])
-       ts_b = re.match(r'(\d{2}:\d{2}:\d{2}[,.]\d{3})', lines_b[1])
-       if ts_a and ts_b:
-           end_a = ts_to_ms(ts_a.group(2))
-           start_b = ts_to_ms(ts_b.group(1))
-           if end_a > start_b:
-               lines_a[1] = f'{ts_a.group(1)} --> {ms_to_ts(start_b)}'
-               merged[i] = '\n'.join(lines_a)
-
-   # 重新編號
-   for i, block in enumerate(merged):
-       lines = block.split('\n')
-       lines[0] = str(i + 1)
-       merged[i] = '\n'.join(lines)
-
-   # Coverage check：用 preprocessed SRT 補洞（local LLM 可能因 max_tokens 截斷丟失條目）
-   PREPROCESSED = '<preprocessed SRT 路徑>'
-   pre_blocks = re.split(r'\n\n+', open(PREPROCESSED).read().strip())
-   merged_starts = set()
-   for block in merged:
-       lines = block.split('\n')
-       ts_m = re.match(r'(\d{2}:\d{2}:\d{2}[,.]\d{3})', lines[1])
-       if ts_m:
-           merged_starts.add(ts_to_ms(ts_m.group(1)))
-
-   patched = 0
-   for b in pre_blocks:
-       lines = b.strip().split('\n')
-       if len(lines) < 3 or '-->' not in lines[1]:
-           continue
-       ts_m = re.match(r'(\d{2}:\d{2}:\d{2}[,.]\d{3})', lines[1])
-       if ts_m and ts_to_ms(ts_m.group(1)) not in merged_starts:
-           # 檢查這個條目是否落在 merged 的某個 gap 裡（>15s）
-           start = ts_to_ms(ts_m.group(1))
-           in_gap = False
-           for j in range(len(merged) - 1):
-               m_lines = merged[j].split('\n')
-               m_next = merged[j+1].split('\n')
-               m_end = re.match(r'\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})', m_lines[1])
-               m_start = re.match(r'(\d{2}:\d{2}:\d{2}[,.]\d{3})', m_next[1])
-               if m_end and m_start:
-                   gap = ts_to_ms(m_start.group(1)) - ts_to_ms(m_end.group(1))
-                   if gap > 15000 and ts_to_ms(m_end.group(1)) <= start <= ts_to_ms(m_start.group(1)):
-                       in_gap = True
-                       break
-           if in_gap:
-               merged.append('\n'.join(lines))
-               patched += 1
-
-   if patched > 0:
-       merged.sort(key=sort_key)
-       # 重新 clamp end times
-       for i in range(len(merged) - 1):
-           lines_a = merged[i].split('\n')
-           lines_b = merged[i+1].split('\n')
-           ts_a = re.match(r'(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})', lines_a[1])
-           ts_b = re.match(r'(\d{2}:\d{2}:\d{2}[,.]\d{3})', lines_b[1])
-           if ts_a and ts_b:
-               end_a = ts_to_ms(ts_a.group(2))
-               start_b = ts_to_ms(ts_b.group(1))
-               if end_a > start_b:
-                   lines_a[1] = f'{ts_a.group(1)} --> {ms_to_ts(start_b)}'
-                   merged[i] = '\n'.join(lines_a)
-       print(f'Coverage check: patched {patched} missing entries from preprocessed SRT')
-
-   # 重新編號
-   for i, block in enumerate(merged):
-       lines = block.split('\n')
-       lines[0] = str(i + 1)
-       merged[i] = '\n'.join(lines)
-
-   output = '<最終合併路徑>_2b_corrected.srt'
-   with open(output, 'w') as f:
-       f.write('\n\n'.join(merged) + '\n')
-   print(f'Merged {len(merged)} entries to {output}')
-   "
+   ```bash
+   python3 "${CORRECT_DIR}/srt_merge_segments.py" \
+       --workdir "${VIDEO_DIR}" \
+       --preprocessed "<preprocessed SRT 路徑>" \
+       --output "<最終合併路徑>_2b_corrected.srt"
    ```
+
+   腳本行為：
+   - **品質 gate**（合併前逐段檢查）：`ratio = 校正後條數 / 原始條數`
+     - `ratio < 0.55` → FAIL（過度合併，如 300→110 事故）
+     - `ratio < 0.80` 且該段有條目時長 > 15 秒 → FAIL（合併症狀）
+     - `0.55 ≤ ratio < 0.80` 且無時長症狀 → 合併照常，記入 `warn_segments`（破碎句密集區的合法合併）
+   - gate 全過 → 嚴格 block 驗證、雙行重複修復、時間排序、end-time clamp、coverage check（>15s gap 用 preprocessed 補洞）、重新編號
+   - 成功：stdout 印 JSON metrics（entries / patched / per_segment ratio / max_dur_sec / over_12s_count），exit 0
+   - gate FAIL：不寫輸出，stdout 印 `{"gate": "fail", "failed_segments": [...]}`，**exit 2**
+
+   **exit 2 時的處理**：對每個 failed segment 重派校正 subagent（同一段、同樣的 prompt），並在 prompt「重要」清單最前面追加一行：「**上一輪輸出只有 <output> 條（原始 <input> 條），嚴重過度合併。這次必須逐條校正，輸出條數 ≥ <input×0.9> 條**」。重派完成後重跑合併腳本。
 
 #### Step 2c: 複查 pass + 後處理
 
@@ -841,9 +568,9 @@ done
    # --ref 只在雲端模式使用（還原被 Sonnet 捏造的時間軸）
    # 本地模式不加 --ref（local LLM 保留原始時間軸，加 --ref 反而會破壞）
    if [ "$LOCAL_MODE" = "true" ]; then
-       python3 "${CORRECT_DIR}/srt_postprocess.py" "<_2c_reviewed.srt>" "<最終輸出路徑>_2c_final.srt" --stats
+       python3 "${CORRECT_DIR}/srt_postprocess.py" "<_2c_reviewed.srt>" "<最終輸出路徑>_2c_final.srt" --stats --terms "${TERMS}"
    else
-       python3 "${CORRECT_DIR}/srt_postprocess.py" "<_2c_reviewed.srt>" "<最終輸出路徑>_2c_final.srt" --stats --ref "<preprocessed SRT 路徑>"
+       python3 "${CORRECT_DIR}/srt_postprocess.py" "<_2c_reviewed.srt>" "<最終輸出路徑>_2c_final.srt" --stats --ref "<preprocessed SRT 路徑>" --terms "${TERMS}"
    fi && \
    # 第二層保險：postprocess 後再掃一次（含 Type B/C 啟發法，處理 split 殘留）
    python3 "${CORRECT_DIR}/srt_strip_commentary.py" "<最終輸出路徑>_2c_final.srt"
@@ -851,24 +578,32 @@ done
 
 ### Step 3: 術語自動學習（每次必跑）
 
-每次 pipeline 完成後自動執行，不需要用戶觸發。
+每次 pipeline 完成後自動執行，不需要用戶觸發。用 `srt_learn_terms.py`（可一次帶多部影片的 pairs）：
 
-1. **比對** `_2a_preprocessed.srt` 和 `_2c_final.srt`，用 difflib.SequenceMatcher 找出 `replace` 操作
-2. **過濾雜訊**：跳過純標點變更、大小寫變更、`他→它` 人稱代詞、超長片段（>10 字）
-3. **統計**：計算每組 `(錯, 對)` 出現次數
-4. **篩選**：出現 >= 2 次、不在現有術語表中、不在 preprocess 規則中
-5. **分類建議**：
-   - 確定性高的機械替換（英文縮寫、固定同音字）→ 建議加入 `srt_preprocess.py` 的 `AUTO_REPLACE_COMMON` 或 `AUTO_REPLACE_BREEZE`
-   - 需要語境判斷的術語 → 建議加入 `terms_austin_v2.txt`
-6. **向用戶展示候選清單**（含出現次數和範例語境），請用戶確認後直接寫入對應檔案
-7. 如果沒有候選（全部已在術語表/preprocess 中），告知用戶「本次無新術語」即可
+```bash
+python3 "${CORRECT_DIR}/srt_learn_terms.py" \
+    --pairs "<2a_preprocessed.srt>:<2c_final.srt>" \
+    [--pairs "<另一部 2a>:<另一部 2c_final>" ...] \
+    --terms "${TERMS}" \
+    --preprocess "${CORRECT_DIR}/srt_preprocess.py" \
+    --min-count 2
+```
+
+腳本完成：difflib 比對 replace 操作、噪音過濾（標點/大小寫/人稱代詞/超長片段）、出現次數統計、
+已收錄判斷（詞級解析 terms 與 preprocess AST，非子字串粗查）、分類建議（preprocess vs terms），
+輸出 markdown 候選表（含 already 標記）。
+
+主 agent 接手：
+1. 從候選表挑出值得收錄的項目（already 標記非 `-` 的跳過；單一英文字母對、過於語境特定的修正不收）
+2. **向用戶展示篩選後清單**（含次數和範例），請用戶確認後寫入對應檔案
+3. 沒有候選 → 告知用戶「本次無新術語」即可
 
 ### Step 4 (有影片檔時): 合併字幕進影片
 
 只有輸入是影片檔（YouTube 下載的 mkv 或本地影片）時才執行。音檔輸入跳過此步。
 
 ```bash
-ffmpeg -i "${VIDEO_DIR}/<影片檔名>" -i "${VIDEO_DIR}/<_2c_final.srt>" \
+ffmpeg -y -i "${VIDEO_DIR}/<影片檔名>" -i "${VIDEO_DIR}/<_2c_final.srt>" \
   -c copy -c:s srt \
   -metadata:s:s:0 language=chi -metadata:s:s:0 title="繁體中文" \
   "${VIDEO_DIR}/<影片檔名>_sub.mkv"
@@ -886,14 +621,21 @@ ffmpeg -i "${VIDEO_DIR}/<影片檔名>" -i "${VIDEO_DIR}/<_2c_final.srt>" \
 pipeline 完成後，刪除 `${VIDEO_DIR}` 內的中間產物，只保留成品：
 
 ```bash
-rm -f "${VIDEO_DIR}"/_seg_*.srt "${VIDEO_DIR}"/_ctx_*.txt \
-      "${VIDEO_DIR}"/_vv_ref_*.txt "${VIDEO_DIR}"/_caption_ref_*.txt \
-      "${VIDEO_DIR}"/_review_seg_*.srt "${VIDEO_DIR}"/_review_seg_*_fixes.txt \
-      "${VIDEO_DIR}"/_system_prompt.txt "${VIDEO_DIR}"/_review_prompt.txt \
-      "${VIDEO_DIR}"/*_vv_part*.wav "${VIDEO_DIR}"/*_vv_part*_vibevoice.json
+find "${VIDEO_DIR}" -maxdepth 1 \( \
+    -name "_seg_*.srt" -o -name "_ctx_*.txt" \
+    -o -name "_vv_ref_*.txt" -o -name "_caption_ref_*.txt" \
+    -o -name "_review_seg_*" -o -name "_system_prompt.txt" -o -name "_review_prompt.txt" \
+    -o -name "*_vvpart*" \
+    -o -name "*_vv_part*" -o -name "*_part*_vibevoice.json" \
+    -o -name "*_part[0-9].wav" -o -name "*_benchmark.txt" \) -delete
+# subtitle.sh 產生的全長 wav（如有）
+rm -f "${VIDEO_DIR}/<影片檔名同名>.wav"
 ```
 
-清理完 `${VIDEO_DIR}` 後，也要檢查 pipeline 過程中是否在其他位置留下暫存檔（如 WAV 暫存檔等），有的話一併刪除。
+（用 find 而非裸 glob：zsh 預設 NOMATCH，任一 pattern 沒匹配整批會 abort。
+`*_vv_part*` 與 `*_part*_vibevoice.json` 是舊版手動切段流程的檔名慣例 — 刻意保留以清理舊 run 殘檔，非失效引用。）
+
+清理完 `${VIDEO_DIR}` 後，也要檢查 pipeline 過程中是否在其他位置留下暫存檔（如 /tmp 下的 WAV 等），有的話一併刪除。
 
 保留的成品（供除錯與階段比較）：
 - 原始影片/音檔
