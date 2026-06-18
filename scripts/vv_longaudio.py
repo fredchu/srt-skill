@@ -143,7 +143,7 @@ def run_vibevoice(vv_script: Path, wav: Path, terms: Path, terms_max: int, outpu
 
 
 def find_unique_part_json(part_wav: Path) -> Path:
-    matches = [Path(p) for p in glob.glob(str(part_wav.with_suffix("")) + "*_vibevoice.json")]
+    matches = [Path(p) for p in glob.glob(glob.escape(str(part_wav.with_suffix(""))) + "*_vibevoice.json")]
     if len(matches) != 1:
         raise RuntimeError(f"expected one JSON for {part_wav.name}, found {len(matches)}: {matches}")
     return matches[0]
@@ -152,7 +152,7 @@ def find_unique_part_json(part_wav: Path) -> Path:
 def find_unique_json_for_stems(stems: Iterable[Path]) -> Path:
     matches: list[Path] = []
     for stem in stems:
-        matches.extend(Path(p) for p in glob.glob(str(stem.with_suffix("")) + "*_vibevoice.json"))
+        matches.extend(Path(p) for p in glob.glob(glob.escape(str(stem.with_suffix(""))) + "*_vibevoice.json"))
     unique = sorted(set(matches))
     if len(unique) != 1:
         raise RuntimeError(f"expected one VibeVoice JSON, found {len(unique)}: {unique}")
