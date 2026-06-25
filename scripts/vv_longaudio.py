@@ -10,6 +10,7 @@ import fcntl
 import glob
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -242,7 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-json", required=True, type=Path)
     parser.add_argument("--output-srt", type=Path)
     parser.add_argument("--max-part-sec", type=float, default=3000)
-    parser.add_argument("--vv-script", type=Path, default=Path("/Users/fredchu/dev/vibevoice-poc/vibevoice_asr.py"))
+    parser.add_argument("--vv-script", type=Path, default=Path(os.environ.get("SRT_VV_SCRIPT", os.path.expanduser("~/dev/vibevoice-poc/vibevoice_asr.py"))))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--lock-file", type=Path, default=Path("/tmp/srt_gpu.lock"))
     return parser
