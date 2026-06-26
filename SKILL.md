@@ -2,10 +2,11 @@
 name: srt
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
-  當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「幫我 transcribe」「srt」
-  「這個影片要上字幕」，或給了 YouTube 連結、影片/音檔路徑並暗示需要字幕時使用。
+  當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
+  或給了 YouTube 連結、影片/音檔路徑並暗示需要「帶時間軸的字幕」時使用。
   也適用於用戶要求「更新術語」「學習術語」「術語表」時（--learn 模式）。
-  不要用於：已有 SRT 只想潤稿（用 subtitle-polisher）、翻譯（用 translator 類 skill）。
+  不要用於：要「忠於原話的整理短文/文字稿（非字幕、無時間軸）」（用 speech-to-prose）、
+  已有 SRT 只想潤稿（用 subtitle-polisher）、翻譯（用 translator 類 skill）。
 ---
 
 # SRT — 一鍵字幕 Pipeline
