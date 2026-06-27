@@ -30,6 +30,7 @@ YouTube link OR local video/audio
 Design highlights:
 - **Two-ASR cross-reference** — a primary ASR plus an optional VibeVoice pass; the LLM uses both to fix English terms and homophones.
 - **Structural quality gate** — the merge step rejects over-merged segments and auto-retries.
+- **Adaptive segment splitting** — dual-constraint splitting (estimated tokens + entry count) keeps each subagent's Write under the 32K output ceiling. The 200-entry cap is calibrated from a cross-video failure-rate curve, not guessed.
 - **Self-growing glossary** — each run diffs corrections and proposes new terminology rules.
 - **Context-frugal** — segmentation/prompt assembly happen on disk; subagents read their own files so the main agent's context stays small.
 
@@ -108,6 +109,7 @@ YouTube 連結 或 本地影片／音檔
 設計重點：
 - **雙路 ASR 交叉參考** — 主 ASR 加上選用的 VibeVoice；LLM 用兩者一起修正英文術語與同音字。
 - **結構性品質 gate** — 合併步驟會擋下過度合併的段落並自動重派。
+- **自適應切分** — 雙約束（估算 token + 條數）切分讓每段 subagent 的 Write 不撞 32K output 上限。200 條上限由跨影片失敗率曲線校準，非拍腦袋。
 - **會自我成長的術語表** — 每次跑完 diff 校正結果，提出新術語規則。
 - **節約 context** — 切分／prompt 組裝都在 disk 上完成，subagent 自己讀檔，主 agent context 維持精簡。
 
