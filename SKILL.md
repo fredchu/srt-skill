@@ -280,12 +280,31 @@ python3 "${CORRECT_DIR}/srt_preprocess.py" "<ASR 產出的 SRT>" "<輸出路徑>
        --workdir "${VIDEO_DIR}" \
        --prompt-template "${CORRECT_DIR}/srt_correct_prompt.txt" \
        --terms "${TERMS}" \
-       --slide-terms "<投影片術語路徑，沒有就省略此參數>" \
-       --vv-json "<VV JSON 路徑，沒有就省略此參數>" \
        --captions-json "<caption JSON 路徑，沒有就省略此參數>"
    ```
 
-   stdout 會印 JSON summary：`{"total_blocks": N, "segments": [...], "vv_segments": N, "captions": N}`。
+   stdout 會印 JSON summary：`{"strategy": "dynamic", "tokenizer": "tiktoken", "total_blocks": N, "segments": [...], "segment_tokens": [...], "vv_segments": N, "captions": N}`。
+
+   > **切分策略：動態 token 預估（預設，2026-06-26 上線）**。不帶 `--seg-size` 時走**雙約束**動態切分：每塊估算 output token，當「累積 token > `--max-tokens`（預設 8000）」**或**「條數 > `--max-entries`（預設 200）」任一觸發就切。預設值不用帶。
+   >
+   > **為什麼要切分**：校正 subagent 逐條保留輸出整段 SRT，段太大時 Write 會報 `response exceeded the 32000 output token maximum`，該段靜默失敗（合併 gate 會 fail 並自動重派，但已浪費一輪）。
+   >
+   > **失敗率曲線（2026-06-27 實測，跨 6 部影片真實 Sonnet subagent）**：
+   > | 每段條數 | 32K 失敗率 | 樣本 |
+   > |---|---|---|
+   > | 150 | 14% | 1/7 |
+   > | 200 | **18%** | 2/11 |
+   > | 250 | 44% | 4/9 |
+   > | 275 | 80% | 4/5 |
+   > | 300 | 71% | 10/14 |
+   >
+   > **拐點在 200→250 之間**：200 是平原末端，250 起內容敏感性引爆（難影片——美股展望/英文密——在 250 條系統性全爆；200 條時連難影片都還 PASS，18% 是隨機底噪）。所以 `--max-entries 200` 是**「內容敏感性引爆前的最大安全 cap」**，有曲線佐證，非拍腦袋。失敗對內容高度敏感，cap 須按 worst-case 難影片定。18% 殘餘失敗由合併 gate 自動重派兜底。
+   >
+   > **為什麼是雙約束而非單一 token 閾值**：用 cl100k_base 實測，校正後 SRT 文字只有 **~35 token/條**，300 條 raw 才 ~10.5K，遠不到 32K。真正撞上限的是**看不到的** Sonnet reasoning/thinking token + Write JSON 序列化開銷（cl100k 量不到，且 raw token 完全不能預測失敗——實測 PASS 樣本 token 範圍涵蓋並高於 FAIL）。所以**不能**只用 raw token 閾值切（文字短時 12K token 會對應到 ~340 條，比已崩的 300 還大）。`--max-entries 200` 是 thinking-token 的代理硬上限，`--max-tokens 8000` 負責密集段提前切。實測 718 條 → **4 段 [200,200,200,118]**（比固定 150 的 5 段少 1 段，省一次 ~10.5K 的 system prompt 重發）。
+   >
+   > **逃生艙**：顯式帶 `--seg-size N` 會切回舊的固定條數模式（向後相容）。heuristic fallback（tiktoken 不可用時用 `len(text)`）只對「含時間軸的完整 SRT block」保守安全，非通用中文 tokenizer，勿挪作他用。
+   >
+   > 教訓與實證來源：2026-06-26-27 投資組合-5月-03（codex 實證 review + 多輪對抗改善循環 + 跨 6 影片失敗率曲線實測收斂）。
 
    這個腳本產出：
    - `_system_prompt.txt`：組裝好的完整 system prompt（含 VV 交叉參考規則 + 畫面描述規則，如有）
@@ -664,4 +683,5 @@ rm -f "${VIDEO_DIR}/<影片檔名同名>.wav"
 - `subtitle.sh` 是長時間命令，用 Bash 工具執行時設定 timeout 600000ms
 - **絕對不要用 Bash 跑 `srt_correct.sh`** — 它內部的 `claude -p` 在 Claude Code session 內會被 CLAUDECODE 環境變數阻擋，導致卡住或失敗。必須用 Agent tool + model: "sonnet" 替代
 - Agent subagent 自己讀取 system prompt 和段落檔案，主 agent 不要把 SRT 內容 inline 到 Agent prompt 裡（避免撐爆主 context）
+- **切分預設走動態 token 預估（雙約束 `--max-tokens 8000` + `--max-entries 200`），不要帶 `--seg-size`**：段太大時 Sonnet subagent 的 Write 會撞 32K output token 上限失敗。真正歸因不是 SRT 文字量（實測 ~35 token/條），而是看不到的 thinking + Write 序列化開銷——所以用「條數硬上限 200」當代理保護，不能只憑 raw token 放大段長。跨 6 影片失敗率曲線實測：150→14%、**200→18%**、250→44%、275→80%、300→71%，拐點在 200→250 間，200 是引爆前的最大安全 cap（殘餘 18% 由合併 gate 自動重派兜底）。`--seg-size N` 仍可切回舊固定模式（逃生艙）。詳見 Step 2b 切分指令下的說明
 - 術語表 `terms_austin_v2.txt` 是 Austin 專用。未來有其他講者，建立新的 `terms_<講者>.txt`

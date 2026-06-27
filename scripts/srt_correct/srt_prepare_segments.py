@@ -5,7 +5,12 @@ import argparse
 import json
 import os
 import re
+import sys
 from pathlib import Path
+
+
+_TOKEN_ENCODER = None
+_TOKENIZER = None
 
 
 VV_SECTION = """
@@ -47,6 +52,89 @@ CAPTION_SECTION = """
 
 畫面描述會寫在每段的 _caption_ref_<N>.txt 檔案中。
 """
+
+
+def _get_token_encoder():
+    global _TOKEN_ENCODER, _TOKENIZER
+    if _TOKENIZER is not None:
+        return _TOKEN_ENCODER
+
+    try:
+        import tiktoken
+
+        _TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+        _TOKENIZER = "tiktoken"
+    except Exception:
+        _TOKEN_ENCODER = False
+        _TOKENIZER = "heuristic"
+
+    print(f"srt_prepare_segments: token estimator: {_TOKENIZER}", file=sys.stderr)
+    return _TOKEN_ENCODER
+
+
+def tokenizer_name():
+    if _TOKENIZER is None:
+        estimate_tokens("")
+    return _TOKENIZER
+
+
+def estimate_tokens(text):
+    global _TOKEN_ENCODER, _TOKENIZER
+    enc = _get_token_encoder()
+    if enc:
+        try:
+            return len(enc.encode(text))
+        except Exception:
+            _TOKEN_ENCODER = False
+            _TOKENIZER = "heuristic"
+            print("srt_prepare_segments: token estimator: heuristic", file=sys.stderr)
+
+    # len(text) is conservative for full SRT blocks as used here because the
+    # index/timestamp/newline ASCII dilutes Chinese payload text. This is
+    # format-dependent, not a general Chinese-text tokenizer substitute.
+    return len(text)
+
+
+def _chunk_dynamic_with_tokens(blocks, block_tokens, max_tokens, max_entries):
+    if max_tokens <= 0 or max_entries <= 0:
+        raise ValueError("max_tokens and max_entries must be positive")
+
+    segments = []
+    segment_tokens = []
+    current = []
+    current_tokens = 0
+
+    for block, block_token_count in zip(blocks, block_tokens):
+        if block_token_count > max_tokens:
+            print(
+                "srt_prepare_segments: WARNING: single block "
+                f"{block_token_count} tokens exceeds max_tokens {max_tokens}; "
+                "emitting as its own oversized segment",
+                file=sys.stderr,
+            )
+
+        would_exceed_tokens = current and current_tokens + block_token_count > max_tokens
+        would_exceed_entries = current and len(current) + 1 > max_entries
+        if would_exceed_tokens or would_exceed_entries:
+            segments.append(current)
+            segment_tokens.append(current_tokens)
+            current = []
+            current_tokens = 0
+
+        current.append(block)
+        current_tokens += block_token_count
+
+    if current:
+        segments.append(current)
+        segment_tokens.append(current_tokens)
+
+    return segments, segment_tokens
+
+
+def chunk_dynamic(blocks, max_tokens, max_entries):
+    block_tokens = [estimate_tokens(block + "\n\n") for block in blocks]
+    segments, _ = _chunk_dynamic_with_tokens(blocks, block_tokens, max_tokens, max_entries)
+    return segments
 
 
 def split_blocks(content):
@@ -183,12 +271,28 @@ def prepare(args):
     (workdir / "_system_prompt.txt").write_text(system_prompt, encoding="utf-8")
 
     blocks = split_blocks(Path(args.preprocessed).read_text(encoding="utf-8"))
-    segments = [blocks[i:i + args.seg_size] for i in range(0, len(blocks), args.seg_size)]
+    block_tokens = [estimate_tokens(block + "\n\n") for block in blocks]
+    if args.seg_size is not None:
+        if args.seg_size <= 0:
+            raise ValueError("seg_size must be positive")
+        segments = [blocks[i:i + args.seg_size] for i in range(0, len(blocks), args.seg_size)]
+        segment_tokens = [
+            sum(block_tokens[i:i + args.seg_size]) for i in range(0, len(blocks), args.seg_size)
+        ]
+        strategy = "fixed"
+    else:
+        segments, segment_tokens = _chunk_dynamic_with_tokens(
+            blocks, block_tokens, args.max_tokens, args.max_entries
+        )
+        strategy = "dynamic"
     write_segment_files(workdir, segments, vv_segments, captions)
 
     return {
+        "strategy": strategy,
+        "tokenizer": tokenizer_name(),
         "total_blocks": len(blocks),
         "segments": [len(segment) for segment in segments],
+        "segment_tokens": segment_tokens,
         "vv_segments": len(vv_segments),
         "captions": len(captions),
     }
@@ -203,7 +307,9 @@ def main():
     parser.add_argument("--slide-terms")
     parser.add_argument("--vv-json")
     parser.add_argument("--captions-json")
-    parser.add_argument("--seg-size", type=int, default=300)
+    parser.add_argument("--seg-size", type=int, default=None)
+    parser.add_argument("--max-tokens", type=int, default=8000)
+    parser.add_argument("--max-entries", type=int, default=200)
     args = parser.parse_args()
     print(json.dumps(prepare(args), ensure_ascii=False))
 

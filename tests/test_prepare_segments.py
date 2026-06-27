@@ -65,7 +65,13 @@ def test_prepare_segments_writes_segments_context_vv_and_prompt(tmp_path):
     )
 
     metrics = json.loads(proc.stdout)
-    assert metrics == {"total_blocks": 8, "segments": [3, 3, 2], "vv_segments": 3, "captions": 0}
+    assert metrics["total_blocks"] == 8
+    assert metrics["segments"] == [3, 3, 2]
+    assert metrics["vv_segments"] == 3
+    assert metrics["captions"] == 0
+    assert metrics["strategy"] == "fixed"
+    assert "tokenizer" in metrics
+    assert len(metrics["segment_tokens"]) == len(metrics["segments"])
     assert (workdir / "_seg_0.srt").read_text(encoding="utf-8").count("-->") == 3
     assert (workdir / "_seg_1.srt").read_text(encoding="utf-8").count("-->") == 3
     assert (workdir / "_seg_2.srt").read_text(encoding="utf-8").count("-->") == 2
