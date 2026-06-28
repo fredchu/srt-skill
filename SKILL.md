@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.0.0
+version: 1.1.0
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -160,7 +160,7 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/srt_extract_slides.py" \
 腳本內部流程：ffmpeg 每 60 秒截一幀 → imagehash 去重 → OCR/VLM 抽術語 → 輸出。
 
 **引擎（`--engine`，預設 `auto`）**：
-- `auto`（推薦）：全平台預設 **RapidOCR v3**（純 CPU、跨 macOS/Windows/Linux 含 VM/Docker；繁體 `chinese_cht` 模型）。安裝 `pip install "rapidocr>=3.9,<4" onnxruntime`。RapidOCR 不可用且在 macOS → 退回 Apple Vision（零安裝）。
+- `auto`（推薦）：全平台預設 **RapidOCR v3**（純 CPU、跨 macOS/Windows/Linux 含 VM/Docker；用 default PP-OCRv5 `ch` 模型，繁中+英文混合一起讀——實測勝專用 `chinese_cht` v3 模型）。安裝 `pip install "rapidocr>=3.9,<4" onnxruntime`。RapidOCR 不可用且在 macOS → 退回 Apple Vision（零安裝）。
 - `--engine apple-vision`：macOS 原生 OCR（零安裝，僅 macOS）。
 - `--engine ollama` / `--engine mlx` 或顯式 `--model`：走 VLM caption（Gemma4:26b Ollama / Qwen3-VL-8B mlx-vlm）—— 會多產散文式畫面描述，但較慢（~10s/幀 vs OCR ~0.5s/幀）。
 > Migration（2026-06-28）：`auto` 從「VLM caption 預設」改為「RapidOCR 預設」。實證 OCR 字面文字對字幕校正品質不輸甚至更好且更省資源（見 wiki `SRT Slide OCR Extraction`）。要舊 VLM 行為請顯式 `--engine ollama` 或給 `--model`。
