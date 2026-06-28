@@ -12,16 +12,32 @@ Output:
     Format is compatible with srt skill's existing terminology injection.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
+import platform
 import re
+import requests
 import subprocess
 import sys
 import tempfile
 import time
 
-import requests
+OLLAMA_DEFAULT_MODEL = "gemma4:26b"
+MLX_DEFAULT_MODEL = "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit"
+UI_CHROME_STOPLIST = {
+    "OBS",
+    "OBS Studio",
+    "Pointofix",
+    "Microsoft PowerPoint",
+    "PowerPoint",
+    "iSlide",
+    "Tiger Trade",
+    "自選",
+    "個股資料",
+}
 
 
 def extract_frames(video_path: str, output_dir: str, interval: int = 60) -> list[tuple[str, float]]:
@@ -104,7 +120,11 @@ def ocr_with_ollama_vlm(frames: list[tuple[str, float]], model_name: str, captio
         }, timeout=300)
         elapsed = time.time() - t0
 
-        output_text = resp.json().get("message", {}).get("content", "")
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and data.get("error"):
+            raise RuntimeError(f"ollama error: {data['error']}")
+        output_text = data.get("message", {}).get("content", "")
         print(f"  [{i+1}/{len(frames)}] {os.path.basename(frame_path)} (t={frame_time:.0f}s) — {elapsed:.1f}s", file=sys.stderr)
 
         results.append({"frame": frame_path, "frame_time": frame_time, "inference_time": elapsed, "raw": output_text})
@@ -136,6 +156,122 @@ def ocr_with_qwen_vlm(frames: list[tuple[str, float]], model_name: str, caption_
         results.append({"frame": frame_path, "frame_time": frame_time, "inference_time": elapsed, "raw": output_text})
 
     return results
+
+
+def _apple_vision_available() -> bool:
+    try:
+        import Vision
+        import Quartz  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(Vision, "VNRecognizeTextRequest")
+
+
+def _warn(message: str):
+    print(f"  WARNING: {message}", file=sys.stderr)
+
+
+def resolve_engine(args) -> tuple[str, str | None]:
+    engine = args.engine
+    model = args.model
+
+    if engine == "auto":
+        if model is not None:
+            return ("mlx", model) if "/" in model else ("ollama", model)
+        if platform.system() == "Darwin" and _apple_vision_available():
+            return "apple-vision", None
+        return "ollama", OLLAMA_DEFAULT_MODEL
+
+    if engine == "apple-vision":
+        if model is not None:
+            _warn("apple-vision ignores --model")
+        if platform.system() != "Darwin" or not _apple_vision_available():
+            raise RuntimeError("apple-vision is only available on macOS with pyobjc Vision/Quartz")
+        return "apple-vision", None
+
+    if engine == "ollama":
+        if model is None:
+            return "ollama", OLLAMA_DEFAULT_MODEL
+        if "/" in model:
+            _warn(f"--engine ollama cannot use HF model path {model}; using {OLLAMA_DEFAULT_MODEL}")
+            return "ollama", OLLAMA_DEFAULT_MODEL
+        return "ollama", model
+
+    if engine == "mlx":
+        if model is None:
+            return "mlx", MLX_DEFAULT_MODEL
+        if "/" not in model:
+            _warn(f"--engine mlx cannot use Ollama model name {model}; using {MLX_DEFAULT_MODEL}")
+            return "mlx", MLX_DEFAULT_MODEL
+        return "mlx", model
+
+    raise RuntimeError(f"unknown engine: {engine}")
+
+
+def _recognize_text_with_vision(frame_path: str, request) -> str:
+    import Quartz
+    from Foundation import NSURL
+    import Vision
+
+    url = NSURL.fileURLWithPath_(frame_path)
+    source = Quartz.CGImageSourceCreateWithURL(url, None)
+    image = Quartz.CGImageSourceCreateImageAtIndex(source, 0, None) if source else None
+    if image is None:
+        raise RuntimeError(f"failed to load image: {frame_path}")
+
+    handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(image, {})
+    ok = handler.performRequests_error_([request], None)
+    if isinstance(ok, tuple) and ok and not ok[0]:
+        raise RuntimeError(ok[1] or "Vision request failed")
+    if ok is False:
+        raise RuntimeError("Vision request failed")
+
+    lines = []
+    for observation in request.results() or []:
+        candidates = observation.topCandidates_(1)
+        if candidates:
+            lines.append(str(candidates[0].string()))
+    return "\n".join(lines)
+
+
+def _ocr_with_apple_vision_languages(frames: list[tuple[str, float]], languages: tuple[str, ...]) -> list[dict]:
+    import Vision
+
+    request = Vision.VNRecognizeTextRequest.alloc().init()
+    request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+    request.setUsesLanguageCorrection_(False)
+    request.setRecognitionLanguages_(list(languages))
+    request.setMinimumTextHeight_(0.0)
+
+    results = []
+    failed = 0
+    last_error = None
+    for i, (frame_path, frame_time) in enumerate(frames):
+        t0 = time.time()
+        try:
+            raw = _recognize_text_with_vision(frame_path, request)
+        except Exception as exc:
+            failed += 1
+            last_error = exc
+            _warn(f"Apple Vision OCR failed for {frame_path}: {exc}")
+            raw = ""
+        elapsed = time.time() - t0
+        print(f"  [{i+1}/{len(frames)}] {os.path.basename(frame_path)} (t={frame_time:.0f}s) — {elapsed:.1f}s", file=sys.stderr)
+        results.append({"frame": frame_path, "frame_time": frame_time, "inference_time": elapsed, "raw": raw})
+    if frames and failed == len(frames):
+        raise RuntimeError(f"Apple Vision OCR failed for all frames: {last_error}")
+    return results
+
+
+def ocr_with_apple_vision(frames: list[tuple[str, float]], languages: tuple[str, ...] = ("zh-Hant", "en-US")) -> list[dict]:
+    """Run macOS Apple Vision OCR on each frame."""
+    try:
+        return _ocr_with_apple_vision_languages(frames, tuple(languages))
+    except Exception as exc:
+        if tuple(languages) != ("en-US",):
+            _warn(f"Apple Vision OCR failed with {languages}; retrying en-US only: {exc}")
+            return _ocr_with_apple_vision_languages(frames, ("en-US",))
+        raise
 
 
 def parse_vlm_outputs(results: list[dict], caption_mode: bool = False) -> dict:
@@ -194,6 +330,56 @@ def parse_vlm_outputs(results: list[dict], caption_mode: bool = False) -> dict:
     }
 
 
+def _ocr_lines(results: list[dict]) -> list[str]:
+    lines = []
+    seen = set()
+    for r in results:
+        for line in r.get("raw", "").splitlines():
+            line = line.strip()
+            if not line or line in seen:
+                continue
+            seen.add(line)
+            lines.append(line)
+    return lines
+
+
+def _conservative_tickers(lines: list[str]) -> list[str]:
+    tickers = set()
+    for line in lines:
+        for token in re.findall(r"\b[A-Z]{2,5}\b", line):
+            if token not in UI_CHROME_STOPLIST:
+                tickers.add(token)
+    return sorted(tickers)
+
+
+def parse_ocr_outputs(results: list[dict], caption_mode: bool = False) -> dict:
+    """Parse plain OCR text without assuming VLM JSON."""
+    lines = _ocr_lines(results)
+    tickers = _conservative_tickers(lines)
+
+    if caption_mode:
+        captions = []
+        for r in results:
+            raw = r.get("raw", "").strip()
+            if raw:
+                captions.append({"time_s": r["frame_time"], "caption": raw, "terms": []})
+        return {"captions": captions, "all_terms": tickers}
+
+    return {
+        "tickers": tickers,
+        "proper_nouns": [],
+        "technical_terms": [],
+        "slide_titles": [],
+        "raw_ocr": lines,
+    }
+
+
+def run_vlm_engine(engine: str, frames: list[tuple[str, float]], model: str, caption_mode: bool) -> list[dict]:
+    if engine == "ollama":
+        return ocr_with_ollama_vlm(frames, model, caption_mode=caption_mode)
+    return ocr_with_qwen_vlm(frames, model, caption_mode=caption_mode)
+
+
 def write_terms_file(terms: dict, output_path: str):
     """Write terminology file compatible with srt skill's _slide_terms.txt format."""
     lines = []
@@ -201,28 +387,34 @@ def write_terms_file(terms: dict, output_path: str):
     lines.append(f"# 抽取時間: {time.strftime('%Y-%m-%d %H:%M')}")
     lines.append("")
 
-    if terms["tickers"]:
+    if terms.get("tickers"):
         lines.append("# Ticker Symbols")
         for t in terms["tickers"]:
             lines.append(t)
         lines.append("")
 
-    if terms["proper_nouns"]:
+    if terms.get("proper_nouns"):
         lines.append("# 專有名詞")
         for n in terms["proper_nouns"]:
             lines.append(n)
         lines.append("")
 
-    if terms["technical_terms"]:
+    if terms.get("technical_terms"):
         lines.append("# 技術/金融術語")
         for t in terms["technical_terms"]:
             lines.append(t)
         lines.append("")
 
-    if terms["slide_titles"]:
+    if terms.get("slide_titles"):
         lines.append("# 投影片標題")
         for t in terms["slide_titles"]:
             lines.append(t)
+        lines.append("")
+
+    if terms.get("raw_ocr"):
+        lines.append("# 螢幕 OCR 文字（原始）")
+        for line in terms["raw_ocr"]:
+            lines.append(line)
         lines.append("")
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -283,8 +475,10 @@ def main():
     parser.add_argument("--output", "-o", help="Output terms file path (default: <video_dir>/_slide_terms.txt)")
     parser.add_argument("--interval", type=int, default=60, help="Frame extraction interval in seconds (default: 60)")
     parser.add_argument("--threshold", type=int, default=8, help="Perceptual hash dedup threshold (default: 8)")
-    parser.add_argument("--model", default="gemma4:26b",
-                        help="VLM model name (default: gemma4:26b via Ollama; use HF path for mlx-vlm)")
+    parser.add_argument("--engine", choices=("auto", "ollama", "mlx", "apple-vision"), default="auto",
+                        help="OCR engine (default: auto)")
+    parser.add_argument("--model", default=None,
+                        help="VLM model name (auto uses Apple Vision on macOS unless --model is explicit)")
     parser.add_argument("--json", action="store_true", help="Also output raw JSON results")
     parser.add_argument("--caption", action="store_true",
                         help="Caption mode: output timestamped captions + terms as _slide_captions.json")
@@ -339,19 +533,42 @@ def main():
 
         # Step 3: OCR/Caption with VLM
         mode_label = "caption" if args.caption else "OCR"
-        use_ollama = "/" not in args.model  # HF paths have /, Ollama names don't
-        backend = "Ollama" if use_ollama else "mlx-vlm"
-        print(f"\n[3/4] Running {mode_label} with {args.model} ({backend})...", file=sys.stderr)
+        try:
+            engine, model = resolve_engine(args)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        backend = {"ollama": "Ollama", "mlx": "mlx-vlm", "apple-vision": "Apple Vision"}[engine]
+        model_label = f" with {model}" if model else ""
+        print(f"\n[3/4] Running {mode_label}{model_label} ({backend})...", file=sys.stderr)
         t0 = time.time()
-        if use_ollama:
-            raw_results = ocr_with_ollama_vlm(unique_frames, args.model, caption_mode=args.caption)
-        else:
-            raw_results = ocr_with_qwen_vlm(unique_frames, args.model, caption_mode=args.caption)
+        try:
+            if engine == "apple-vision":
+                raw_results = ocr_with_apple_vision(unique_frames)
+            else:
+                raw_results = run_vlm_engine(engine, unique_frames, model, args.caption)
+        except Exception as exc:
+            if engine != "apple-vision" or args.engine != "auto":
+                print(f"ERROR: {backend} failed: {exc}", file=sys.stderr)
+                sys.exit(1)
+            _warn(f"Apple Vision failed; falling back to Ollama {OLLAMA_DEFAULT_MODEL}: {exc}")
+            engine, model, backend = "ollama", OLLAMA_DEFAULT_MODEL, "Ollama"
+            try:
+                raw_results = run_vlm_engine(engine, unique_frames, model, args.caption)
+            except Exception as ollama_exc:
+                _warn(f"Ollama fallback failed; trying mlx-vlm {MLX_DEFAULT_MODEL}: {ollama_exc}")
+                engine, model, backend = "mlx", MLX_DEFAULT_MODEL, "mlx-vlm"
+                try:
+                    raw_results = run_vlm_engine(engine, unique_frames, model, args.caption)
+                except Exception as mlx_exc:
+                    print(f"ERROR: all engines failed (Apple Vision → Ollama → mlx-vlm); last error: {mlx_exc}", file=sys.stderr)
+                    sys.exit(1)
         print(f"  → {mode_label} completed in {time.time()-t0:.1f}s", file=sys.stderr)
 
     # Step 4: Parse and write
     print(f"\n[4/4] Parsing and writing output...", file=sys.stderr)
-    parsed = parse_vlm_outputs(raw_results, caption_mode=args.caption)
+    parsed = parse_ocr_outputs(raw_results, caption_mode=args.caption) if engine == "apple-vision" else parse_vlm_outputs(raw_results, caption_mode=args.caption)
 
     if args.caption:
         # Caption mode: write timestamped captions JSON
