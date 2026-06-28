@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### 變更
+- Step 0.5 `auto` 預設 OCR 改為跨平台 RapidOCR v3，純 CPU 跨 macOS/Windows/Linux（含 VM/Docker）。安裝：`pip install "rapidocr>=3.9,<4" onnxruntime`（RapidOCR 不會自動帶 ONNX Runtime backend）。Apple Vision 保留為 macOS 可選引擎與 RapidOCR 不可用時的 macOS 保底。
+- `--engine` 現支援 `{auto,rapidocr,apple-vision,ollama,mlx}`；顯式 `--model` 仍代表 VLM 意圖，`auto` 下含 `/` 走 mlx，否則走 ollama。
+
+### 修正
+- 顯式 `--engine mlx/ollama --model ...` 現在原樣傳遞 model，不再用 slash heuristic 丟棄本機或 Windows 路徑。
+- `ffmpeg` 缺失時改為輸出各平台安裝指引，避免裸 `FileNotFoundError`。
+
 ## 1.0.0 - 2026-06-27
 
 首個正式 release。一鍵字幕 pipeline 已開源就緒（雙語 README + LICENSE + Windows 指南）。

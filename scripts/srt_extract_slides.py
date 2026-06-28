@@ -15,11 +15,12 @@ Output:
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import platform
 import re
-import requests
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ import time
 
 OLLAMA_DEFAULT_MODEL = "gemma4:26b"
 MLX_DEFAULT_MODEL = "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit"
+OCR_ENGINES = {"apple-vision", "rapidocr"}
 UI_CHROME_STOPLIST = {
     "OBS",
     "OBS Studio",
@@ -43,6 +45,12 @@ UI_CHROME_STOPLIST = {
 def extract_frames(video_path: str, output_dir: str, interval: int = 60) -> list[tuple[str, float]]:
     """Extract one frame per interval seconds using ffmpeg.
     Returns list of (path, time_seconds) tuples."""
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError(
+            "ffmpeg not found. Install ffmpeg first: macOS `brew install ffmpeg`; "
+            "Windows `winget install Gyan.FFmpeg` or `choco install ffmpeg`; "
+            "Linux `sudo apt install ffmpeg`."
+        )
     pattern = os.path.join(output_dir, "frame_%04d.jpg")
     cmd = [
         "ffmpeg", "-i", video_path,
@@ -102,6 +110,7 @@ def ocr_with_ollama_vlm(frames: list[tuple[str, float]], model_name: str, captio
     """Run Ollama vision model on each frame. Works with gemma4, llava, etc."""
     import base64
 
+    requests = importlib.import_module("requests")
     prompt = _get_vlm_prompt(caption_mode)
     url = "http://localhost:11434/api/chat"
 
@@ -167,6 +176,14 @@ def _apple_vision_available() -> bool:
     return hasattr(Vision, "VNRecognizeTextRequest")
 
 
+def _rapidocr_importable() -> bool:
+    try:
+        importlib.import_module("rapidocr")
+    except ImportError:
+        return False
+    return True
+
+
 def _warn(message: str):
     print(f"  WARNING: {message}", file=sys.stderr)
 
@@ -178,9 +195,18 @@ def resolve_engine(args) -> tuple[str, str | None]:
     if engine == "auto":
         if model is not None:
             return ("mlx", model) if "/" in model else ("ollama", model)
+        if _rapidocr_importable():
+            return "rapidocr", None
         if platform.system() == "Darwin" and _apple_vision_available():
             return "apple-vision", None
-        return "ollama", OLLAMA_DEFAULT_MODEL
+        raise RuntimeError('RapidOCR is required for auto OCR. Install with: pip install "rapidocr>=3.9,<4" onnxruntime')
+
+    if engine == "rapidocr":
+        if model is not None:
+            _warn("rapidocr ignores --model")
+        if not _rapidocr_importable():
+            raise RuntimeError('rapidocr is not installed. Install with: pip install "rapidocr>=3.9,<4" onnxruntime')
+        return "rapidocr", None
 
     if engine == "apple-vision":
         if model is not None:
@@ -192,16 +218,10 @@ def resolve_engine(args) -> tuple[str, str | None]:
     if engine == "ollama":
         if model is None:
             return "ollama", OLLAMA_DEFAULT_MODEL
-        if "/" in model:
-            _warn(f"--engine ollama cannot use HF model path {model}; using {OLLAMA_DEFAULT_MODEL}")
-            return "ollama", OLLAMA_DEFAULT_MODEL
         return "ollama", model
 
     if engine == "mlx":
         if model is None:
-            return "mlx", MLX_DEFAULT_MODEL
-        if "/" not in model:
-            _warn(f"--engine mlx cannot use Ollama model name {model}; using {MLX_DEFAULT_MODEL}")
             return "mlx", MLX_DEFAULT_MODEL
         return "mlx", model
 
@@ -272,6 +292,74 @@ def ocr_with_apple_vision(frames: list[tuple[str, float]], languages: tuple[str,
             _warn(f"Apple Vision OCR failed with {languages}; retrying en-US only: {exc}")
             return _ocr_with_apple_vision_languages(frames, ("en-US",))
         raise
+
+
+def _rapidocr_result_lines(result) -> list[str]:
+    txts = getattr(result, "txts", None)
+    if txts is not None:
+        return [str(text).strip() for text in txts if str(text).strip()]
+
+    to_json = getattr(result, "to_json", None)
+    if callable(to_json):
+        data = to_json() or []
+        return [str(item.get("text", item.get("txt", ""))).strip() for item in data if str(item.get("text", item.get("txt", ""))).strip()]
+
+    lines = []
+    for item in result or []:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            text = item[1]
+            if isinstance(text, (list, tuple)) and text:
+                text = text[0]
+            text = str(text).strip()
+            if text:
+                lines.append(text)
+    return lines
+
+
+def ocr_with_rapidocr(frames: list[tuple[str, float]], lang: str | None = None) -> list[dict]:
+    """Run RapidOCR v3 on each frame and return plain OCR text.
+
+    Uses the default PP-OCRv5 ``ch`` model, which empirically beats the dedicated
+    ``chinese_cht`` v3 model on Fred's mixed English-ticker + Traditional-Chinese
+    screens (11 vs 1 ticker hits on a real Tiger Trade frame, 2026-06-28): the v5
+    ``ch`` model reads English tickers cleanly AND Traditional Chinese correctly,
+    while the older chinese_cht v3 rec model mangles English. ``lang`` is reserved
+    for an explicit override and is currently unused.
+    """
+    try:
+        from rapidocr import RapidOCR
+    except ImportError as exc:
+        raise RuntimeError('rapidocr is not installed. Install with: pip install "rapidocr>=3.9,<4" onnxruntime') from exc
+
+    try:
+        engine = RapidOCR()
+    except Exception as exc:
+        raise RuntimeError(
+            "RapidOCR engine construction failed. Likely causes: (1) the ONNX Runtime backend is "
+            "not installed (pip install onnxruntime), or (2) the OCR model is missing or its cache "
+            "is unavailable (allow network on first run, or pre-load the model into the RapidOCR "
+            f"cache for offline/Docker). Original error: {exc}"
+        ) from exc
+
+    results = []
+    failed = 0
+    last_error = None
+    for i, (frame_path, frame_time) in enumerate(frames):
+        t0 = time.time()
+        try:
+            # OCR output is text-only by design; bbox/score intentionally not persisted in this version.
+            raw = "\n".join(_rapidocr_result_lines(engine(frame_path)))
+        except Exception as exc:
+            failed += 1
+            last_error = exc
+            _warn(f"RapidOCR failed for {frame_path}: {exc}")
+            raw = ""
+        elapsed = time.time() - t0
+        print(f"  [{i+1}/{len(frames)}] {os.path.basename(frame_path)} (t={frame_time:.0f}s) — {elapsed:.1f}s", file=sys.stderr)
+        results.append({"frame": frame_path, "frame_time": frame_time, "inference_time": elapsed, "raw": raw})
+    if frames and failed == len(frames):
+        raise RuntimeError(f"RapidOCR failed for all frames: {last_error}")
+    return results
 
 
 def parse_vlm_outputs(results: list[dict], caption_mode: bool = False) -> dict:
@@ -475,10 +563,10 @@ def main():
     parser.add_argument("--output", "-o", help="Output terms file path (default: <video_dir>/_slide_terms.txt)")
     parser.add_argument("--interval", type=int, default=60, help="Frame extraction interval in seconds (default: 60)")
     parser.add_argument("--threshold", type=int, default=8, help="Perceptual hash dedup threshold (default: 8)")
-    parser.add_argument("--engine", choices=("auto", "ollama", "mlx", "apple-vision"), default="auto",
+    parser.add_argument("--engine", choices=("auto", "rapidocr", "apple-vision", "ollama", "mlx"), default="auto",
                         help="OCR engine (default: auto)")
     parser.add_argument("--model", default=None,
-                        help="VLM model name (auto uses Apple Vision on macOS unless --model is explicit)")
+                        help="VLM model name (auto infers mlx when the model contains '/', otherwise ollama)")
     parser.add_argument("--json", action="store_true", help="Also output raw JSON results")
     parser.add_argument("--caption", action="store_true",
                         help="Caption mode: output timestamped captions + terms as _slide_captions.json")
@@ -517,7 +605,11 @@ def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         print(f"\n[1/4] Extracting frames (1 per {args.interval}s)...", file=sys.stderr)
         t0 = time.time()
-        frames = extract_frames(video_path, tmpdir, args.interval)
+        try:
+            frames = extract_frames(video_path, tmpdir, args.interval)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
         print(f"  → {len(frames)} frames extracted in {time.time()-t0:.1f}s", file=sys.stderr)
 
         # Step 2: Deduplicate
@@ -539,36 +631,41 @@ def main():
             print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(1)
 
-        backend = {"ollama": "Ollama", "mlx": "mlx-vlm", "apple-vision": "Apple Vision"}[engine]
+        backend = {"ollama": "Ollama", "mlx": "mlx-vlm", "apple-vision": "Apple Vision", "rapidocr": "RapidOCR"}[engine]
         model_label = f" with {model}" if model else ""
         print(f"\n[3/4] Running {mode_label}{model_label} ({backend})...", file=sys.stderr)
         t0 = time.time()
         try:
-            if engine == "apple-vision":
+            if engine == "rapidocr":
+                raw_results = ocr_with_rapidocr(unique_frames)
+            elif engine == "apple-vision":
                 raw_results = ocr_with_apple_vision(unique_frames)
             else:
                 raw_results = run_vlm_engine(engine, unique_frames, model, args.caption)
         except Exception as exc:
-            if engine != "apple-vision" or args.engine != "auto":
+            if args.engine != "auto" or engine not in OCR_ENGINES:
                 print(f"ERROR: {backend} failed: {exc}", file=sys.stderr)
                 sys.exit(1)
-            _warn(f"Apple Vision failed; falling back to Ollama {OLLAMA_DEFAULT_MODEL}: {exc}")
+            attempted = [backend]
+            _warn(f"{backend} failed; falling back to Ollama {OLLAMA_DEFAULT_MODEL}: {exc}")
             engine, model, backend = "ollama", OLLAMA_DEFAULT_MODEL, "Ollama"
             try:
                 raw_results = run_vlm_engine(engine, unique_frames, model, args.caption)
             except Exception as ollama_exc:
+                attempted.append(backend)
                 _warn(f"Ollama fallback failed; trying mlx-vlm {MLX_DEFAULT_MODEL}: {ollama_exc}")
                 engine, model, backend = "mlx", MLX_DEFAULT_MODEL, "mlx-vlm"
                 try:
                     raw_results = run_vlm_engine(engine, unique_frames, model, args.caption)
                 except Exception as mlx_exc:
-                    print(f"ERROR: all engines failed (Apple Vision → Ollama → mlx-vlm); last error: {mlx_exc}", file=sys.stderr)
+                    attempted.append(backend)
+                    print(f"ERROR: all engines failed ({' → '.join(attempted)}); last error: {mlx_exc}", file=sys.stderr)
                     sys.exit(1)
         print(f"  → {mode_label} completed in {time.time()-t0:.1f}s", file=sys.stderr)
 
     # Step 4: Parse and write
     print(f"\n[4/4] Parsing and writing output...", file=sys.stderr)
-    parsed = parse_ocr_outputs(raw_results, caption_mode=args.caption) if engine == "apple-vision" else parse_vlm_outputs(raw_results, caption_mode=args.caption)
+    parsed = parse_ocr_outputs(raw_results, caption_mode=args.caption) if engine in OCR_ENGINES else parse_vlm_outputs(raw_results, caption_mode=args.caption)
 
     if args.caption:
         # Caption mode: write timestamped captions JSON

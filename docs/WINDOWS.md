@@ -20,7 +20,7 @@ The skill's **orchestration + LLM-correction layers are cross-platform Python an
 | Step | Native Windows | In WSL2 | Notes |
 |------|:--:|:--:|-------|
 | Step 0 — `yt-dlp` download | ✅ | ✅ | cross-platform |
-| Step 0.5 — caption (Ollama vision) | ✅ | ✅ | Ollama runs on Windows; `mlx-vlm` fallback does **not** |
+| Step 0.5 — OCR terms (RapidOCR, default) | ✅ | ✅ | `auto` default; pure-CPU cross-platform, `pip install "rapidocr>=3.9,<4" onnxruntime`. VLM caption still available via `--engine ollama` (Ollama runs on Windows; `mlx-vlm` fallback does **not**) |
 | **Step 1 — Breeze/Whisper ASR (MLX)** | ❌ | ❌ | MLX is Apple-Silicon-only → **substitute** (see below) |
 | Step 1' — VibeVoice ASR (MLX) | ❌ | ❌ | optional; skip on Windows |
 | Step 1.5 — hallucination fix | ⚠️ | ✅ | re-runs ASR internally → needs the substitute ASR wired in |
@@ -84,7 +84,7 @@ The skill resolves user paths from `$HOME` with env-var overrides — the same `
 | 步驟 | 原生 Windows | WSL2 內 | 說明 |
 |------|:--:|:--:|------|
 | Step 0 — `yt-dlp` 下載 | ✅ | ✅ | 跨平台 |
-| Step 0.5 — caption（Ollama vision） | ✅ | ✅ | Ollama 在 Windows 可跑；`mlx-vlm` fallback **不行** |
+| Step 0.5 — OCR 術語（RapidOCR，預設） | ✅ | ✅ | `auto` 預設；純 CPU 跨平台，`pip install "rapidocr>=3.9,<4" onnxruntime`。VLM caption 仍可用 `--engine ollama`（Ollama 在 Windows 可跑；`mlx-vlm` fallback **不行**） |
 | **Step 1 — Breeze/Whisper ASR（MLX）** | ❌ | ❌ | MLX 僅 Apple Silicon → **需替換**（見下） |
 | Step 1' — VibeVoice ASR（MLX） | ❌ | ❌ | 選用；Windows 直接跳過 |
 | Step 1.5 — 幻覺修復 | ⚠️ | ✅ | 內部會重跑 ASR → 需接上替代 ASR |

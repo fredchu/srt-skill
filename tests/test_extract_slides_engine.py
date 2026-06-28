@@ -12,16 +12,35 @@ def args(engine="auto", model=None):
     return Namespace(engine=engine, model=model)
 
 
-def test_resolve_engine_auto_without_model_uses_apple_vision_on_mac(monkeypatch):
+def test_resolve_engine_auto_without_model_uses_rapidocr(monkeypatch):
     monkeypatch.setattr(slides.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(slides, "_apple_vision_available", lambda: True)
+    monkeypatch.setattr(slides, "_rapidocr_importable", lambda: True)
+
+    assert slides.resolve_engine(args()) == ("rapidocr", None)
+
+
+def test_resolve_engine_auto_without_rapidocr_falls_back_to_apple_vision_on_mac(monkeypatch):
+    monkeypatch.setattr(slides.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(slides, "_apple_vision_available", lambda: True)
+    monkeypatch.setattr(slides, "_rapidocr_importable", lambda: False)
 
     assert slides.resolve_engine(args()) == ("apple-vision", None)
+
+
+def test_resolve_engine_auto_without_rapidocr_errors_off_mac(monkeypatch):
+    monkeypatch.setattr(slides.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(slides, "_apple_vision_available", lambda: False)
+    monkeypatch.setattr(slides, "_rapidocr_importable", lambda: False)
+
+    with pytest.raises(RuntimeError, match="rapidocr>=3.9,<4"):
+        slides.resolve_engine(args())
 
 
 def test_resolve_engine_auto_with_explicit_model_uses_vlm_intent(monkeypatch):
     monkeypatch.setattr(slides.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(slides, "_apple_vision_available", lambda: True)
+    monkeypatch.setattr(slides, "_rapidocr_importable", lambda: True)
 
     assert slides.resolve_engine(args(model="gemma4:26b")) == ("ollama", "gemma4:26b")
     assert slides.resolve_engine(args(model=slides.MLX_DEFAULT_MODEL)) == ("mlx", slides.MLX_DEFAULT_MODEL)
@@ -33,7 +52,8 @@ def test_resolve_engine_explicit_ollama_and_mlx_override(monkeypatch):
 
     assert slides.resolve_engine(args(engine="ollama")) == ("ollama", slides.OLLAMA_DEFAULT_MODEL)
     assert slides.resolve_engine(args(engine="mlx")) == ("mlx", slides.MLX_DEFAULT_MODEL)
-    assert slides.resolve_engine(args(engine="mlx", model="gemma4:26b")) == ("mlx", slides.MLX_DEFAULT_MODEL)
+    assert slides.resolve_engine(args(engine="mlx", model="gemma4:26b")) == ("mlx", "gemma4:26b")
+    assert slides.resolve_engine(args(engine="mlx", model=r"C:\models\qwen")) == ("mlx", r"C:\models\qwen")
 
 
 def test_resolve_engine_explicit_apple_vision_errors_off_mac(monkeypatch):
@@ -42,6 +62,13 @@ def test_resolve_engine_explicit_apple_vision_errors_off_mac(monkeypatch):
 
     with pytest.raises(RuntimeError):
         slides.resolve_engine(args(engine="apple-vision"))
+
+
+def test_resolve_engine_explicit_rapidocr_errors_when_missing(monkeypatch):
+    monkeypatch.setattr(slides, "_rapidocr_importable", lambda: False)
+
+    with pytest.raises(RuntimeError, match="rapidocr>=3.9,<4"):
+        slides.resolve_engine(args(engine="rapidocr"))
 
 
 def test_parse_ocr_outputs_keeps_plain_text_and_raw_ocr():
@@ -68,6 +95,55 @@ def test_apple_vision_available_import_failure_is_false(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fail_vision_import)
 
     assert slides._apple_vision_available() is False
+
+
+def test_rapidocr_importable_import_failure_is_false(monkeypatch):
+    def fake_import(name):
+        if name == "rapidocr":
+            raise ImportError("no rapidocr")
+        return types.ModuleType(name)
+
+    monkeypatch.setattr(slides.importlib, "import_module", fake_import)
+
+    assert slides._rapidocr_importable() is False
+
+
+def test_rapidocr_importable_success_is_true(monkeypatch):
+    monkeypatch.setattr(slides.importlib, "import_module", lambda name: types.ModuleType(name))
+
+    assert slides._rapidocr_importable() is True
+
+
+def test_ocr_with_rapidocr_returns_plain_text_for_parse_ocr_outputs(monkeypatch):
+    fake_rapidocr = types.ModuleType("rapidocr")
+    captured = {}
+
+    class FakeRapidOCR:
+        def __init__(self, *args, **kwargs):
+            captured["constructed"] = True
+
+        def __call__(self, frame_path):
+            if frame_path == "bad.jpg":
+                raise RuntimeError("bad frame")
+            return types.SimpleNamespace(txts=("NVDA", "台積電"))
+
+    fake_rapidocr.RapidOCR = FakeRapidOCR
+    monkeypatch.setitem(sys.modules, "rapidocr", fake_rapidocr)
+
+    results = slides.ocr_with_rapidocr([("bad.jpg", 1), ("ok.jpg", 2)])
+    parsed = slides.parse_ocr_outputs(results)
+
+    assert captured.get("constructed") is True
+    assert [r["raw"] for r in results] == ["", "NVDA\n台積電"]
+    assert parsed["tickers"] == ["NVDA"]
+    assert parsed["raw_ocr"] == ["NVDA", "台積電"]
+
+
+def test_extract_frames_errors_when_ffmpeg_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(slides.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="ffmpeg not found"):
+        slides.extract_frames("video.mp4", str(tmp_path), 60)
 
 
 def test_apple_vision_partial_frame_failure_keeps_other_frames(monkeypatch):
@@ -112,32 +188,32 @@ def test_apple_vision_partial_frame_failure_keeps_other_frames(monkeypatch):
 def test_ollama_vlm_raises_on_http_error(monkeypatch, tmp_path):
     frame = tmp_path / "frame.jpg"
     frame.write_bytes(b"jpeg")
+    fake_requests = types.ModuleType("requests")
+
+    class HTTPError(Exception):
+        pass
 
     def raise_404():
-        raise slides.requests.HTTPError("404 Client Error")
+        raise HTTPError("404 Client Error")
 
-    monkeypatch.setattr(
-        slides.requests,
-        "post",
-        lambda *_args, **_kwargs: types.SimpleNamespace(raise_for_status=raise_404, json=lambda: {}),
-    )
+    fake_requests.HTTPError = HTTPError
+    fake_requests.post = lambda *_args, **_kwargs: types.SimpleNamespace(raise_for_status=raise_404, json=lambda: {})
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
 
-    with pytest.raises(slides.requests.HTTPError):
+    with pytest.raises(HTTPError):
         slides.ocr_with_ollama_vlm([(str(frame), 1)], "missing-model")
 
 
 def test_ollama_vlm_raises_on_ollama_error_json(monkeypatch, tmp_path):
     frame = tmp_path / "frame.jpg"
     frame.write_bytes(b"jpeg")
+    fake_requests = types.ModuleType("requests")
 
-    monkeypatch.setattr(
-        slides.requests,
-        "post",
-        lambda *_args, **_kwargs: types.SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {"error": "model 'missing-model' not found"},
-        ),
+    fake_requests.post = lambda *_args, **_kwargs: types.SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {"error": "model 'missing-model' not found"},
     )
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
 
     with pytest.raises(RuntimeError, match="ollama error: model 'missing-model' not found"):
         slides.ocr_with_ollama_vlm([(str(frame), 1)], "missing-model")
@@ -146,15 +222,13 @@ def test_ollama_vlm_raises_on_ollama_error_json(monkeypatch, tmp_path):
 def test_ollama_vlm_returns_message_content(monkeypatch, tmp_path):
     frame = tmp_path / "frame.jpg"
     frame.write_bytes(b"jpeg")
+    fake_requests = types.ModuleType("requests")
 
-    monkeypatch.setattr(
-        slides.requests,
-        "post",
-        lambda *_args, **_kwargs: types.SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {"message": {"content": '{"tickers":["NVDA"]}'}},
-        ),
+    fake_requests.post = lambda *_args, **_kwargs: types.SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {"message": {"content": '{"tickers":["NVDA"]}'}},
     )
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
 
     results = slides.ocr_with_ollama_vlm([(str(frame), 1)], "gemma4:26b")
 

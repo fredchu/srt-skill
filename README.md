@@ -42,7 +42,7 @@ Design highlights:
 |-----------|-------------|
 | Primary ASR (`subtitle.sh`) | `ffmpeg`, `mlx-whisper`, `opencc` (Apple Silicon) |
 | LLM correction | Claude Code (Sonnet subagents) **or** local Ollama (`--local`) |
-| Caption extraction (Step 0.5, optional) | Ollama vision model, or `mlx-vlm` fallback |
+| Slide OCR (Step 0.5, default) | RapidOCR v3 (cross-platform CPU): `pip install "rapidocr>=3.9,<4" onnxruntime`. VLM caption optional via `--engine ollama/mlx` |
 | VibeVoice ASR (Step 1', optional) | external repo — see below |
 | Download (YouTube) | `yt-dlp` |
 | Mux (video) | `ffmpeg` |
@@ -121,7 +121,7 @@ YouTube 連結 或 本地影片／音檔
 |------|------|
 | 主 ASR（`subtitle.sh`） | `ffmpeg`、`mlx-whisper`、`opencc`（Apple Silicon） |
 | LLM 校正 | Claude Code（Sonnet subagent）**或** 本地 Ollama（`--local`） |
-| Caption 擷取（Step 0.5，選用） | Ollama vision 模型，或 `mlx-vlm` fallback |
+| 投影片 OCR（Step 0.5，預設） | RapidOCR v3（跨平台純 CPU）：`pip install "rapidocr>=3.9,<4" onnxruntime`。VLM caption 選用 `--engine ollama/mlx` |
 | VibeVoice ASR（Step 1'，選用） | 外部 repo — 見下 |
 | 下載（YouTube） | `yt-dlp` |
 | 內嵌字幕（影片） | `ffmpeg` |

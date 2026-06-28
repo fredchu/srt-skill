@@ -69,7 +69,8 @@ ${SUBTITLE_DIR}/
 | Breeze ASR + VibeVoice | ✅ 可（skill 標準平行組合） |
 | 兩個 VibeVoice instance | ❌ 不可（vv_longaudio.py 內建 flock 鎖強制序列） |
 | 兩部影片同時跑 ASR（2×Breeze+2×VV） | ❌ 不可 — 多影片時 ASR 階段逐部排隊，前一部進入 Step 2 後下一部才開始 ASR |
-| VLM caption（Step 0.5）+ 任一 ASR | ❌ 不可（Step 0.5 必須等 ASR 全部完成） |
+| RapidOCR（Step 0.5，預設）+ 任一 ASR | ✅ 可（RapidOCR 純 CPU，不搶 MLX GPU） |
+| VLM caption（Step 0.5，`--engine ollama/mlx`）+ 任一 ASR | ❌ 不可（VLM 走 GPU，須等 ASR 全部完成） |
 | Step 2b/2c subagent（雲端）+ 任何本地 GPU 工作 | ✅ 可 |
 
 ## 執行步驟
@@ -156,8 +157,13 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/srt_extract_slides.py" \
 - `<檔名>_slide_captions.json`：帶時間戳的 caption 陣列，格式 `[{time_s, caption, terms}, ...]`
 - `<檔名>_slide_terms.txt`：全局術語表（向下相容）
 
-腳本內部流程：ffmpeg 每 60 秒截一幀 → imagehash 去重 → VLM caption + 術語抽取 → JSON 輸出。
-預設使用 Gemma4:26b（Ollama vision，品質較高）。Ollama 不可用時 fallback 到 Qwen3-VL-8B（mlx-vlm）：`--model lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit`。
+腳本內部流程：ffmpeg 每 60 秒截一幀 → imagehash 去重 → OCR/VLM 抽術語 → 輸出。
+
+**引擎（`--engine`，預設 `auto`）**：
+- `auto`（推薦）：全平台預設 **RapidOCR v3**（純 CPU、跨 macOS/Windows/Linux 含 VM/Docker；繁體 `chinese_cht` 模型）。安裝 `pip install "rapidocr>=3.9,<4" onnxruntime`。RapidOCR 不可用且在 macOS → 退回 Apple Vision（零安裝）。
+- `--engine apple-vision`：macOS 原生 OCR（零安裝，僅 macOS）。
+- `--engine ollama` / `--engine mlx` 或顯式 `--model`：走 VLM caption（Gemma4:26b Ollama / Qwen3-VL-8B mlx-vlm）—— 會多產散文式畫面描述，但較慢（~10s/幀 vs OCR ~0.5s/幀）。
+> Migration（2026-06-28）：`auto` 從「VLM caption 預設」改為「RapidOCR 預設」。實證 OCR 字面文字對字幕校正品質不輸甚至更好且更省資源（見 wiki `SRT Slide OCR Extraction`）。要舊 VLM 行為請顯式 `--engine ollama` 或給 `--model`。
 
 在 Step 2b 組裝 prompt 時：
 - `_slide_terms.txt` 加在術語表後面（全局，與舊行為相同）
