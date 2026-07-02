@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0 - 2026-07-03
+
+### 新功能
+- Step 3 術語學習新增 12 條 Austin 財經同音字規則（教育日→交易日、建商/健常/減長→建倉、長途→長投、日先→日線、波頓→波段、曲線盤整→區間盤整、識字管理→市值管理、均值回饋→均值回歸、健康週期→建倉週期、週三白→週三百），由 投資組合-6月-01/02 兩支影片術語學習產出。
+
+### 修正
+- Step 2c commentary strip 新增 tool-call / XML tag 洩漏清理。校正 subagent 偶爾把工具呼叫閉合 tag（`</content></invoke>` 等）寫進校正輸出的字幕尾行，下游 force-split 又把它拆成整行 tag、行首碎片（`</` + `content>`）、行尾殘缺開頭（`<invoke name="x"`），導致成品字幕出現裸 tag。改用已知 tool-tag 名稱 allowlist（`invoke`/`parameter`/`content`/`function_calls`/`tool_use`/`tool_result`，含 `antml:` 前綴）+ 逐行剝除（非整行刪，保住 inline 接在中文後的真字幕）；allowlist 避免誤刪 `AAPL>` / `<BRK.B>` / `<ETF>` 等合法英文行。經兩輪 codex reviewer 對抗審查收斂，新增 `tests/test_strip_commentary.py`（38 case，全套 91 passed）。
+
 ## 1.1.0 - 2026-06-28
 
 ### 新功能
