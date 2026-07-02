@@ -16,6 +16,31 @@ import sys
 from pathlib import Path
 
 
+# Tool-call / XML tag 洩漏清理（allowlist）：校正 subagent 偶爾把工具呼叫閉合 tag
+# 寫進校正輸出的字幕尾（如 那這種...</content></invoke>），下游 force-split 又會把它
+# 連同真字幕拆句，散成 </content></invoke> 整行、</ + content> 碎片、或行尾裸 <。
+# 只針對「已知會洩漏的 tag 名稱」剝除（不用寬鬆 WORD>，避免誤刪 AAPL> / <BRK.B> 等
+# 合法英文行）。剝除而非整行刪，才能保住 inline 接在中文後的真字幕。
+_TT_NAME = r'(?:antml:)?(?:invoke|parameter|parameters|function_calls|content|tool_use|tool_result)'
+_TOOL_TAG_RESIDUE = re.compile(
+    r'</?' + _TT_NAME + r'(?:\s[^<>]*?)?/?>'      # 完整/半：<invoke name="x"> </content> <content>
+    r'|<' + r'/?' + _TT_NAME + r'(?:\s[^<>]*)?$'  # 行尾殘缺開頭（split 切在 > 前）：…<invoke name="x"  …</content
+    r'|^/?' + _TT_NAME + r'>'                      # 行首碎片（左 < 被 split 掉）：content>  /invoke>
+    r'|^[\w:]+="[^"]*"\s*/?>'                      # 行首屬性續行碎片：name="x">
+    r'|<[/]?\s*$'                                  # 行尾裸 < 或 </（右半被 split 掉）
+)
+
+
+def strip_tool_tag_residue(line: str) -> str:
+    """反覆剝除一行內的 tool-call/XML tag 殘留（含相鄰多 tag），回傳剝乾淨的字幕文字。"""
+    prev = None
+    s = line
+    while prev != s:
+        prev = s
+        s = _TOOL_TAG_RESIDUE.sub('', s).strip()
+    return s
+
+
 def is_commentary_line(line: str) -> bool:
     s = line.strip()
     if not s:
@@ -79,11 +104,18 @@ def clean(path: Path) -> tuple[int, int, int]:
         if i in type_c_idx:
             type_c += 1
             continue  # 整 block 刪除
-        clean_lines = [l for l in b['text_lines'] if not is_commentary_line(l)]
+        clean_lines = []
+        for l in b['text_lines']:
+            if is_commentary_line(l):
+                continue
+            sanitized = strip_tool_tag_residue(l)  # 剝行內/行尾 tool-tag 殘留
+            if not sanitized.strip():
+                continue  # 整行都是 tag 殘留 → 丟棄
+            clean_lines.append(sanitized)
         if not clean_lines:
             type_b += 1
             continue
-        if len(clean_lines) < len(b['text_lines']):
+        if clean_lines != b['text_lines']:
             type_a += 1
         out.append('\n'.join(b['header'] + clean_lines))
 
