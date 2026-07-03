@@ -73,6 +73,38 @@ def _is_in_english_word(text, pos):
            text[pos].isascii() and text[pos].isalpha()
 
 
+def _is_cjk(ch):
+    """判斷是否為中日韓表意文字（用來決定標點是否該全形）。"""
+    return bool(ch) and ('一' <= ch <= '鿿' or '㐀' <= ch <= '䶿'
+                         or '豈' <= ch <= '﫿')
+
+
+def normalize_fullwidth_punct(text):
+    """把中文語境的半形標點正規化為全形（字幕慣例）。
+
+    ASR 無標點，標點由 LLM 校正時加上；LLM 在英文 token 後（如 "AWS, Google"）
+    常留半形逗號/問號。此步做確定性收尾，不依賴 LLM 記得用全形。
+
+    保守規則（只碰高信度、低誤傷的情況）：
+    - 逗號 ,→，：但保護數字千分位（3,000）與純英數上下文（\\d,\\d 不動）。
+    - 問號 ?→？、驚嘆號 !→！：只有緊鄰前一個非空白字元是 CJK 時才轉，
+      避免動到純英文（"WTF!"、URL query "?a=1"）。
+    - 句號 . 不動（小數點/U.S./版本號誤傷風險高）；冒號分號不動（時間 10:00、比例）。
+    """
+    # 逗號→全形，並吃掉英文慣例的尾隨空格（"AWS, Google"→"AWS，Google"）
+    text = re.sub(r'(?<!\d), ?(?!\d)', '，', text)
+
+    def _repl(m):
+        s = m.string
+        j = m.start() - 1
+        while j >= 0 and s[j] == ' ':
+            j -= 1
+        prev = s[j] if j >= 0 else ''
+        return {'?': '？', '!': '！'}[m.group(0)] if _is_cjk(prev) else m.group(0)
+
+    return re.sub(r'[?!]', _repl, text)
+
+
 def force_split(entry):
     """強制拆分超長字幕，保護英文單字邊界"""
     text = entry["text"]
@@ -399,6 +431,14 @@ def main():
     entries = parse_srt(input_path)
     original_count = len(entries)
 
+    # Pass 0.1: 全形標點正規化（字幕慣例；在 force_split 前做，讓拆句的「，」也一致）
+    fw_norm_count = 0
+    for e in entries:
+        norm = normalize_fullwidth_punct(e["text"])
+        if norm != e["text"]:
+            fw_norm_count += 1
+            e["text"] = norm
+
     # Pass 0: 時間軸還原（如果提供了 ref）
     tc_restored = 0
     if ref_path:
@@ -525,6 +565,7 @@ def main():
         if tc_restored:
             parts.append(f"時間軸還原{tc_restored}條")
         parts.extend([
+            f"全形標點{fw_norm_count}條",
             f"移除句點{period_count}條",
             f"術語保護{term_merge_count}處",
             f"去重{dedup_count}條",
