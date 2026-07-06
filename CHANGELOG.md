@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0 - 2026-07-06
+
+### 新功能
+- **Step 2d 名詞查證 pass**。校正 subagent 在校正時把「與上下文矛盾的專有名詞」（公司名／ticker／人名／術語）另寫獨立 sidecar（`_seg_N_uncertain.json`，單一 JSON envelope；以 `corrected_sha256` 綁定該段校正產物，重跑殘留的舊 sidecar 會被 hash 比對擋下）——**corrected srt 的 SRT-only 輸出契約完全不動**。合併完成後主流程走四層查證：L0 全文音近變體交叉比對優先（同一實體通常被提到多次、每次錯法不同，重用 speech-to-prose 的 `noun_xref.py`）、L1 本地資源（講者術語表／投影片 OCR）、L2 中性網路搜尋（**禁止把猜測放進 query**——帶假設搜尋只會自我證實）、L3 查不動的只進報告不改字幕。修正以「時間戳 ±2s ＋原詞比對」逐處定位（cue 編號經 merge 重編、不可作定位依據），0 或多重命中一律不自動改；確認的對應以獨立註解行＋純 `wrong→correct` 格式回寫術語表（行內註解會被 parser 吃進 term）。
+- gate-fail 重派段落前先刪該段舊 sidecar；Step 5 清理清單納入 `_seg_*_uncertain.json`；完成回報新增名詞查證摘要（查證／修正／未收斂／溢出／stale 丟棄計數）。
+
+### 文檔
+- README（英/中）：pipeline 圖加 Step 2d、design highlights 加名詞查證段；補上 1.3.0 全形標點正規化的英文版說明（先前僅中文版有）。
+- 實戰驗證：7 小時財經直播全量審計——138 個獨特可疑名詞、214+ 處修正（KISS→KEYS、one room→萬潤、asyna→Synaptics 等）；設計經 5 輪對抗式 review + 實作 2 輪 verify（codex）收斂。
+
 ## 1.3.0 - 2026-07-03
 
 ### 新功能
