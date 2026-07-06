@@ -23,6 +23,7 @@ YouTube link OR local video/audio
   ↓ Step 2a                 mechanical preprocessing
   ↓ Step 2b                 segmented LLM correction (Claude subagents, or local Ollama)
   ↓ Step 2c                 review pass + post-processing
+  ↓ Step 2d                 noun verification pass (flag → cross-reference → bounded verify → scoped fix)
   ↓ Step 3                  terminology auto-learning (the glossary grows over time)
   ↓ Step 4  (video only)    ffmpeg mux subtitles into the video
 ```
@@ -32,6 +33,8 @@ Design highlights:
 - **Structural quality gate** — the merge step rejects over-merged segments and auto-retries.
 - **Adaptive segment splitting** — dual-constraint splitting (estimated tokens + entry count) keeps each subagent's Write under the 32K output ceiling. The 200-entry cap is calibrated from a cross-video failure-rate curve, not guessed.
 - **Self-growing glossary** — each run diffs corrections and proposes new terminology rules.
+- **Noun verification pass** — correction subagents flag proper nouns that contradict their context (sidecar JSON, hash-bound to the corrected output); a post-merge pass verifies them through four evidence layers (whole-transcript phonetic cross-reference first, local sources, neutral web search with the guess barred from queries, else report-only) and applies fixes with timestamp-scoped replacement — never whole-file substitution. Confirmed mappings feed back into the glossary.
+- **Fullwidth punctuation normalization** — a deterministic Step 2c pass converts half-width commas/question/exclamation marks in CJK context to fullwidth (protecting thousands separators, decimals, and times) instead of relying on the LLM to remember.
 - **Context-frugal** — segmentation/prompt assembly happen on disk; subagents read their own files so the main agent's context stays small.
 
 ### Platform & requirements
@@ -102,6 +105,7 @@ YouTube 連結 或 本地影片／音檔
   ↓ Step 2a                 機械性預處理
   ↓ Step 2b                 分段 LLM 校正（Claude subagent，或本地 Ollama）
   ↓ Step 2c                 複查 pass + 後處理
+  ↓ Step 2d                 名詞查證 pass（標記 → 全文交叉比對 → 有界查證 → 逐處修正）
   ↓ Step 3                  術語自動學習（術語表會隨使用成長）
   ↓ Step 4   (僅影片)       ffmpeg 把字幕內嵌進影片
 ```
@@ -111,6 +115,7 @@ YouTube 連結 或 本地影片／音檔
 - **結構性品質 gate** — 合併步驟會擋下過度合併的段落並自動重派。
 - **自適應切分** — 雙約束（估算 token + 條數）切分讓每段 subagent 的 Write 不撞 32K output 上限。200 條上限由跨影片失敗率曲線校準，非拍腦袋。
 - **會自我成長的術語表** — 每次跑完 diff 校正結果，提出新術語規則。
+- **名詞查證 pass** — 校正 subagent 把「與上下文矛盾的專有名詞」寫進 sidecar（以 SHA-256 綁定該段校正產物防殘留）；合併後主流程走四層查證（全文音近變體交叉比對優先、本地資源、中性網路搜尋且禁止把猜測放進 query、查不動就只進報告），修正以時間戳定位逐處套用、絕不全檔取代，確認的對應會回寫術語表。
 - **全形標點正規化** — Step 2c 後處理確定性把中文語境的半形逗號／問號／驚嘆號轉全形（保護數字千分位、小數點、時間），不依賴 LLM 每次記得用全形。
 - **節約 context** — 切分／prompt 組裝都在 disk 上完成，subagent 自己讀檔，主 agent context 維持精簡。
 
