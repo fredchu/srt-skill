@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.2 - 2026-07-08
+
+### 修復
+- **背景長任務「等待踩空」防呆**。事故：跑 2h13m 影片時 VibeVoice 早已跑完，但等待它的背景輪詢等待器 Bash timeout 設太短（10 分，誤抄前景 subtitle.sh 慣例）被靜默殺、輸出空白、完成通知永不來；主 session 把「沒通知」當「還在跑」空等約 6 小時。更深根因：啟動 Breeze/VV/OCR 時把 `nohup <cmd> &` 塞進工具層 `run_in_background`（double-background），`&` 把真 job detach，harness 只追蹤到啟動器 → 完成通知提早假觸發，才逼出脆弱等待器。
+- **SKILL.md 新增「背景啟動 + 等待契約」**：長 job 用 `run_in_background` 跑純命令、命令內任何地方不得 inner-backgrounding/daemonize（`nohup`／結尾 `&`／`setsid`／spawn-and-exit）；完成以「harness 通知（正常觸發、非硬 gate）＋ strict 產物檢查」確認，**沉默/沒通知一律主動回查、絕不無限等**；必需/選用語義（Breeze hard-fail、VibeVoice warn-and-skip）、引擎並行邊界（Breeze+VV+RapidOCR 可並行、VLM caption 必序列在 GPU ASR 後）、`ScheduleWakeup` 為 Pro CC 主 session 專屬（Codex/本地 worker 不呼叫）。修掉 line 730「600000ms」誤導錨（只適用前景 subtitle.sh，附 bad/good 範例）。
+- **新增 `scripts/check_stage_artifacts.py`**（+ 11 case 測試）：單次、冪等、JSON 輸出的 strict 階段就緒檢查器。逐 cue 結構化驗證 SRT（完整時軸 + MM/SS<60 + ms<1000 + end>start + ≥1 非空文字）、VV JSON（≥1 usable segment、容忍 metadata 列但擋畸形 speech 列）、caption JSON 形狀，且要求產物 newer than launch marker。把「檔存在≠有效」碼化——**v1.4.1 那個 0-byte SRT 會被它判 invalid 而非 ready**。
+
+> 修法走 `/dispatch` loop mode（design → codex review 1 blocker+6 major → worker → 真實 e2e 含 0-byte → codex verify 1 major+3 minor → worker polish），每步主 session 獨立重跑驗證；配合 memory `feedback_background_wait_watchdog_not_silence` 通則（跨 skill 情境）。
+
 ## 1.4.1 - 2026-07-08
 
 ### 修復

@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.4.1
+version: 1.4.2
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -73,6 +73,21 @@ ${SUBTITLE_DIR}/
 | VLM caption（Step 0.5，`--engine ollama/mlx`）+ 任一 ASR | ❌ 不可（VLM 走 GPU，須等 ASR 全部完成） |
 | Step 2b/2c subagent（雲端）+ 任何本地 GPU 工作 | ✅ 可 |
 
+## 背景啟動 + 等待契約
+
+長時間背景 job 必須用工具層的 `run_in_background:true` 跑純命令，例如 `cd "${VIDEO_DIR}" && python3 ...`。被啟動的命令內任何地方都不得 inner-backgrounding / daemonize：不得 `nohup`、結尾 `&`、`setsid`、spawn-and-exit wrapper。否則 harness 只會追蹤到啟動器，完成通知會提早假觸發。
+
+每個背景 job 啟動前先 `touch "${VIDEO_DIR}/.<stage>.launch"`（或記錄同等啟動時刻）。正常路徑是收到 harness 對真進程的完成通知後，立刻跑 `scripts/check_stage_artifacts.py --marker <marker> <type>:<path> ...` 做 strict 產物驗證，checker 回 `ready` 才往下。通知只是正常觸發訊號，不是硬性 gate；通知可能漏/丟，且「檔存在」不等於有效。本 repo 已有 mlx_whisper 0-byte SRT fail-loud 前例（README fail-loud、`subtitle.sh strict_srt_count`）。沉默或沒通知不得阻塞：主動查進程/log 並跑 checker 回查；checker 已判 `ready` 時即可據此收尾（必需階段）或記 warning 跳過（選用階段），絕不因等不到通知而無限等。status-checker 也會要求預期產物 newer than marker，避免撿到上一輪舊產物。
+
+必需/選用語義：
+- Breeze ASR 是必需階段。產物無效，或進程消失且沒有有效 SRT，必須 hard-fail。
+- VibeVoice 是選用參考。進程消失但沒有有效 VV SRT/JSON 時，擷取 log/exit code 記 warning，跳過 VV 交叉參考繼續；絕不無限等。
+- OCR/caption 依 slide-ref 是否為本次必要輸入比照處理；選用 caption 失敗時記 warning 並略過 caption ref。
+
+並行邊界按引擎判斷：Breeze + VibeVoice 可並行；RapidOCR（純 CPU）可與 ASR 並行；VLM caption（`--engine ollama/mlx` 或顯式 VLM model）必須序列在 GPU ASR 之後，不能籠統宣稱 Step 0.5 可與 ASR 並行。
+
+`ScheduleWakeup` 是 Pro CC（主 session）專屬，用於 quota-wait 或顯式 resume。Codex / 本地 worker 不能呼叫；背景等待只能留下可續產物或 retry marker，然後用手動/status 回查恢復。
+
 ## 執行步驟
 
 ### 解析用戶意圖
@@ -101,7 +116,7 @@ ${SUBTITLE_DIR}/
 ```
 
 - exit 0 / `decision=="allow"`：照原 pipeline 發起 subagent。
-- exit 2 / `decision=="wait"`：呼叫 `ScheduleWakeup` 到 JSON 的 `resume_at`，wake prompt 要寫明從 `${VIDEO_DIR}` 既有 `_seg_*`、`_seg_*_corrected.srt`、`_2b_corrected.srt` 等產物 resume；醒來先重跑 quota check，再只補未完成段。
+- exit 2 / `decision=="wait"`：Pro CC（主 session）呼叫 `ScheduleWakeup` 到 JSON 的 `resume_at`，wake prompt 要寫明從 `${VIDEO_DIR}` 既有 `_seg_*`、`_seg_*_corrected.srt`、`_2b_corrected.srt` 等產物 resume；醒來先重跑 quota check，再只補未完成段。Codex / 本地 worker 不呼叫 `ScheduleWakeup`，只留下可續產物或 retry marker。
 - `decision=="probe_failed"`：按 `retry_at` 或 `retry_after_seconds` 短延遲重試一次，不把它當成 5h reset。
 - `extra_usage.state` 為 `disabled`/`exhausted`：降低雲端 batch concurrency，或改用 `--local` 路徑；不要等不存在的 reset。
 - `--local` / Ollama 路徑不需要 Claude quota gate。
@@ -145,11 +160,11 @@ cp "<原始路徑>" "${VIDEO_DIR}/"
 - 下載完成後，用 `${VIDEO_DIR}` 內的 mkv 檔案路徑繼續 Step 1
 - 影片檔在 pipeline 結束後保留，不要刪除
 
-### Step 0.5: 畫面 Caption 擷取（ASR 完成後執行）
+### Step 0.5: 畫面 Caption 擷取（依引擎決定並行）
 
 從影片畫面自動擷取帶時間戳的 caption，供 Step 2b 校正時作為視覺語境參考。
 
-**執行時機**：Step 1（ASR）和 Step 1'（VV）都完成後、Step 2a 之前或之後。不可與 ASR 平行（都吃 MLX GPU）。
+**執行時機**：RapidOCR / Apple Vision 是 CPU 或平台 OCR，可與 Step 1（ASR）和 Step 1'（VV）並行。`--engine ollama` / `--engine mlx` 或顯式 VLM model 會吃 GPU，必須等 Step 1 和 Step 1' 完成後、Step 2a 之前或之後再跑。
 
 **如果用戶提供了投影片檔**，跳過自動擷取，直接用該檔作為全局術語表（舊行為）：
 - `.txt`（純文字）→ 直接當術語表用
@@ -727,7 +742,7 @@ rm -f "${VIDEO_DIR}/<影片檔名同名>.wav"
 
 ## 注意事項
 
-- `subtitle.sh` 是長時間命令，用 Bash 工具執行時設定 timeout 600000ms
+- `subtitle.sh` 是前景長時間命令，用 Bash 工具執行時可設定 timeout 600000ms；這只適用前景 `subtitle.sh`，不得套到背景等待器。背景啟動 bad：把 `nohup python3 ... &` 塞進 background Bash。背景啟動 good：`cd "${VIDEO_DIR}" && python3 ...` 搭配工具層 `run_in_background:true`，且命令內無 inner backgrounding。
 - **絕對不要用 Bash 跑 `srt_correct.sh`** — 它內部的 `claude -p` 在 Claude Code session 內會被 CLAUDECODE 環境變數阻擋，導致卡住或失敗。必須用 Agent tool + model: "sonnet" 替代
 - Agent subagent 自己讀取 system prompt 和段落檔案，主 agent 不要把 SRT 內容 inline 到 Agent prompt 裡（避免撐爆主 context）
 - **切分預設走動態 token 預估（雙約束 `--max-tokens 8000` + `--max-entries 200`），不要帶 `--seg-size`**：段太大時 Sonnet subagent 的 Write 會撞 32K output token 上限失敗。真正歸因不是 SRT 文字量（實測 ~35 token/條），而是看不到的 thinking + Write 序列化開銷——所以用「條數硬上限 200」當代理保護，不能只憑 raw token 放大段長。跨 6 影片失敗率曲線實測：150→14%、**200→18%**、250→44%、275→80%、300→71%，拐點在 200→250 間，200 是引爆前的最大安全 cap（殘餘 18% 由合併 gate 自動重派兜底）。`--seg-size N` 仍可切回舊固定模式（逃生艙）。詳見 Step 2b 切分指令下的說明
