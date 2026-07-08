@@ -31,6 +31,7 @@ YouTube link OR local video/audio
 Design highlights:
 - **Two-ASR cross-reference** — a primary ASR plus an optional VibeVoice pass; the LLM uses both to fix English terms and homophones.
 - **Structural quality gate** — the merge step rejects over-merged segments and auto-retries.
+- **Fail-loud ASR** — if the ASR step yields an empty/0-byte SRT (a known `mlx_whisper` `KeyError: 'words'` writer bug that discards output despite a successful transcription), the pipeline reconstructs the SRT from the captured verbose stdout, or hard-fails — it never silently reports success on an empty subtitle.
 - **Adaptive segment splitting** — dual-constraint splitting (estimated tokens + entry count) keeps each subagent's Write under the 32K output ceiling. The 200-entry cap is calibrated from a cross-video failure-rate curve, not guessed.
 - **Self-growing glossary** — each run diffs corrections and proposes new terminology rules.
 - **Noun verification pass** — correction subagents flag proper nouns that contradict their context (sidecar JSON, hash-bound to the corrected output); a post-merge pass verifies them through four evidence layers (whole-transcript phonetic cross-reference first, local sources, neutral web search with the guess barred from queries, else report-only) and applies fixes with timestamp-scoped replacement — never whole-file substitution. Confirmed mappings feed back into the glossary.
@@ -113,6 +114,7 @@ YouTube 連結 或 本地影片／音檔
 設計重點：
 - **雙路 ASR 交叉參考** — 主 ASR 加上選用的 VibeVoice；LLM 用兩者一起修正英文術語與同音字。
 - **結構性品質 gate** — 合併步驟會擋下過度合併的段落並自動重派。
+- **ASR 失敗會出聲** — 若 ASR 步驟產出空／0-byte SRT（mlx_whisper 已知的 `KeyError: 'words'` 寫檔 bug：辨識其實成功卻丟棄輸出），pipeline 會從捕獲的 verbose stdout 重建 SRT，否則直接 hard-fail——絕不對空字幕靜默回報成功。
 - **自適應切分** — 雙約束（估算 token + 條數）切分讓每段 subagent 的 Write 不撞 32K output 上限。200 條上限由跨影片失敗率曲線校準，非拍腦袋。
 - **會自我成長的術語表** — 每次跑完 diff 校正結果，提出新術語規則。
 - **名詞查證 pass** — 校正 subagent 把「與上下文矛盾的專有名詞」寫進 sidecar（以 SHA-256 綁定該段校正產物防殘留）；合併後主流程走四層查證（全文音近變體交叉比對優先、本地資源、中性網路搜尋且禁止把猜測放進 query、查不動就只進報告），修正以時間戳定位逐處套用、絕不全檔取代，確認的對應會回寫術語表。

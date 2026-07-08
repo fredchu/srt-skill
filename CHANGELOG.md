@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.1 - 2026-07-08
+
+### 修復
+- **消滅 ASR 靜默 0-byte SRT 假完成**。`mlx_whisper` 在 `word_timestamps=False` 下，SRT writer 會存取不存在的 `segment['words']` 丟 `KeyError: 'words'` 並略過寫檔——辨識其實完整成功、但 SRT 從沒落地（0 條），`subtitle.sh` 卻仍 `exit 0` 印「✅ 全部完成」。現在 `subtitle.sh` 用 `mktemp + tee` 捕獲 mlx_whisper 的 verbose stdout（`set +e`／`PIPESTATUS`，不靠其 exit code），ASR 後加嚴格 SRT 時間軸 gate（`strict_srt_count`，避免把雜檔誤收成有效輸出）；SRT 缺失或 0 條時從 stdout 重建，重建仍 0 條 → `exit 1`（不再假完成）。fallback 的檔名探索也收緊為 `${BASENAME}*.srt` 且限定 marker 之後。
+- 新增 `scripts/reconstruct_srt_from_log.py`：從 mlx_whisper verbose stdout 重建 SRT。strict「每個時間戳行＝一個完整 cue」解析——對**交錯出現在串流中段的 traceback**（實測 mlx 的 KeyError 交錯在中段、辨識仍續到結尾）與尾隨的 `KeyError:`／`Skipping` 錯誤噴發行天然免疫，不截斷後續 cue、不讓錯誤行滲入字幕。支援 `MM:SS.mmm` 與 `HH:MM:SS.mmm` 兩式、`.`／`,` 毫秒分隔、UTF-8 BOM／CRLF；`.`→`,` 只作用於時間欄（`3.5%`、URL 等文字逐字保留）；整行音樂符號（`♪`）與空段丟棄，僅在 `Traceback (most recent call last):`（marker 緊接冒號）才剝尾以免誤截講者字面用詞。
+- 新增 `scripts/tests/test_reconstruct_srt_from_log.py`：鎖死上述迴歸的 regression 測試（交錯 traceback 不截斷／錯誤行不滲入、字面 marker 保留、雙時間格式、comma 毫秒、BOM+CRLF、return code 契約）。經 codex mutation 驗證確能擋回退。
+
+> 修法走 `/dispatch` loop mode：設計 → codex review → codex worker → 真實 log e2e 抓到「break-on-traceback 丟 554 條」迴歸 → 退回 worker 修＋補測試 → codex 對抗式 verify（mutation 證測試有效）→ codex worker 收 minor；每步主 session 獨立重跑驗證。實戰資料：財經M平方 2h13m 直播 → 重建 2384 條乾淨、0 錯誤滲入。
+
 ## 1.4.0 - 2026-07-06
 
 ### 新功能

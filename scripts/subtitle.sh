@@ -97,6 +97,15 @@ format_duration() {
     fi
 }
 
+strict_srt_count() {
+    local f=$1
+    if [ ! -f "$f" ]; then
+        echo 0
+        return
+    fi
+    grep -cE '^[0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} --> [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3}' "$f" 2>/dev/null || true
+}
+
 # ---------- 參數解析 ----------
 INPUT_FILE=""
 USE_BREEZE=false
@@ -237,21 +246,52 @@ if [ -n "$INITIAL_PROMPT" ]; then
     MLX_WHISPER_ARGS+=(--initial-prompt "$INITIAL_PROMPT")
 fi
 
-mlx_whisper "${MLX_WHISPER_ARGS[@]}" "$WAV_FILE"
+MLX_MARKER="$(mktemp -t mlx_marker.XXXXXX)"
+MLX_STDOUT_LOG="$(mktemp -t mlx_stdout.XXXXXX)"
+set +e
+mlx_whisper "${MLX_WHISPER_ARGS[@]}" "$WAV_FILE" 2>&1 | tee "$MLX_STDOUT_LOG"
+mlx_status=${PIPESTATUS[0]}
+set -e
 
 # mlx-whisper --output-name 仍使用 pathlib.with_suffix()，
 # 檔名含 .數字 時會被截斷（如 Qwen3.5 → Qwen3.srt）。
 # 因此用 find 搜尋實際產出的 SRT 檔案作為 fallback。
 MLX_OUTPUT="${DIR}/${BASENAME}.srt"
 if [ ! -f "$MLX_OUTPUT" ]; then
-    # Fallback: 找最近 60 秒內在 output-dir 產生的 .srt 檔案
-    MLX_OUTPUT=$(find "$DIR" -maxdepth 1 -name '*.srt' -newer "$WAV_FILE" -print -quit 2>/dev/null)
-    if [ -z "$MLX_OUTPUT" ] || [ ! -f "$MLX_OUTPUT" ]; then
-        print_error "Whisper 輸出檔案未產生，請檢查錯誤訊息"
-        exit 1
+    MLX_FOUND=""
+    while IFS= read -r candidate; do
+        if [ -z "$MLX_FOUND" ] || [ "$candidate" -nt "$MLX_FOUND" ]; then
+            MLX_FOUND="$candidate"
+        fi
+    done < <(find "$DIR" -maxdepth 1 -name "${BASENAME}*.srt" -newer "$MLX_MARKER" -print 2>/dev/null)
+    if [ -n "$MLX_FOUND" ] && [ -f "$MLX_FOUND" ]; then
+        MLX_OUTPUT="$MLX_FOUND"
+        print_warning "Whisper 輸出檔名與預期不同：$(basename "$MLX_OUTPUT")"
+    else
+        MLX_OUTPUT="${DIR}/${BASENAME}.srt"
     fi
-    print_warning "Whisper 輸出檔名與預期不同：$(basename "$MLX_OUTPUT")"
 fi
+
+MLX_FALLBACK_USED=false
+if [ "$(strict_srt_count "$MLX_OUTPUT")" -eq 0 ]; then
+    MLX_FALLBACK_USED=true
+    print_warning "Whisper SRT 缺失或沒有有效時間軸，疑似 mlx_whisper KeyError:'words'；嘗試從 verbose stdout 重建。log: $MLX_STDOUT_LOG"
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    python3 "${SCRIPT_DIR}/reconstruct_srt_from_log.py" "$MLX_STDOUT_LOG" "$MLX_OUTPUT" || true
+fi
+
+if [ "$(strict_srt_count "$MLX_OUTPUT")" -eq 0 ]; then
+    print_error "Whisper 未產生有效 SRT（mlx exit=$mlx_status）；已保留 stdout log: $MLX_STDOUT_LOG"
+    rm -f "$MLX_MARKER"
+    exit 1
+fi
+
+if [ "$MLX_FALLBACK_USED" = false ]; then
+    rm -f "$MLX_STDOUT_LOG"
+else
+    print_warning "已使用 stdout fallback 重建 SRT；保留 log 供除錯：$MLX_STDOUT_LOG"
+fi
+rm -f "$MLX_MARKER"
 
 # 搬移到預期的 SRT_CN 路徑
 if [ "$MLX_OUTPUT" != "$SRT_CN" ]; then
