@@ -209,9 +209,12 @@ cd "${VIDEO_DIR}" && python3 "${SRT_VV_SCRIPT:-$HOME/dev/vibevoice-poc/vibevoice
     "${VIDEO_DIR}/<影片或音檔名>" \
     --terms "${TERMS}" \
     --terms-max 50 \
+    ${SLIDE_TERMS:+--slide-terms "${SLIDE_TERMS}" --slide-terms-max 25} \
     --json \
     --output "${VIDEO_DIR}/<檔名>_vibevoice.srt"
 ```
+
+> `SLIDE_TERMS="${VIDEO_DIR}/<檔名>_slide_terms.txt"` 若 Step 0.5 有產出就設它，讓 VV 在 ASR 階段就注入本集螢幕英文 ticker/公司名（slide 優先、保留講者詞配額）；沒有則留空、行為不變。
 
 **長音檔（> 55 分鐘）— 用 `vv_longaudio.py` 自動切段：**
 
@@ -221,6 +224,7 @@ cd "${VIDEO_DIR}" && python3 "${SRT_VV_SCRIPT:-$HOME/dev/vibevoice-poc/vibevoice
 cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/vv_longaudio.py" \
     "${VIDEO_DIR}/<影片或音檔名>" \
     --terms "${TERMS}" --terms-max 50 \
+    ${SLIDE_TERMS:+--slide-terms "${SLIDE_TERMS}" --slide-terms-max 25} \
     --output-json "${VIDEO_DIR}/<檔名>_vibevoice.json" \
     --output-srt "${VIDEO_DIR}/<檔名>_vibevoice.srt"
 ```

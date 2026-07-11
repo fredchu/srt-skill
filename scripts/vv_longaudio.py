@@ -125,22 +125,21 @@ def gpu_lock(lock_file: Path):
         yield
 
 
-def run_vibevoice(vv_script: Path, wav: Path, terms: Path, terms_max: int, output_srt: Path) -> None:
-    subprocess.run(
-        [
-            sys.executable,
-            str(vv_script),
-            str(wav),
-            "--terms",
-            str(terms),
-            "--terms-max",
-            str(terms_max),
-            "--json",
-            "--output",
-            str(output_srt),
-        ],
-        check=True,
-    )
+def run_vibevoice(vv_script: Path, wav: Path, terms: Path, terms_max: int, output_srt: Path,
+                  slide_terms: Path | None = None, slide_terms_max: int = 25) -> None:
+    cmd = [
+        sys.executable,
+        str(vv_script),
+        str(wav),
+        "--terms",
+        str(terms),
+        "--terms-max",
+        str(terms_max),
+    ]
+    if slide_terms is not None:
+        cmd += ["--slide-terms", str(slide_terms), "--slide-terms-max", str(slide_terms_max)]
+    cmd += ["--json", "--output", str(output_srt)]
+    subprocess.run(cmd, check=True)
 
 
 def find_unique_part_json(part_wav: Path) -> Path:
@@ -240,6 +239,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("media_file", type=Path)
     parser.add_argument("--terms", required=True, type=Path)
     parser.add_argument("--terms-max", type=int, default=50)
+    parser.add_argument("--slide-terms", type=Path, default=None)
+    parser.add_argument("--slide-terms-max", type=int, default=25)
     parser.add_argument("--output-json", required=True, type=Path)
     parser.add_argument("--output-srt", type=Path)
     parser.add_argument("--max-part-sec", type=float, default=3000)
@@ -285,7 +286,8 @@ def main(argv: list[str] | None = None) -> int:
                 vv_input = part_wav
             part_srts.append(part_srt)
             with gpu_lock(args.lock_file):
-                run_vibevoice(args.vv_script, vv_input, args.terms, args.terms_max, part_srt)
+                run_vibevoice(args.vv_script, vv_input, args.terms, args.terms_max, part_srt,
+                              slide_terms=args.slide_terms, slide_terms_max=args.slide_terms_max)
             if vv_input == part_wav:
                 part_jsons.append(find_unique_part_json(part_wav))
             else:
