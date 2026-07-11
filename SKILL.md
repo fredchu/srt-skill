@@ -209,12 +209,11 @@ cd "${VIDEO_DIR}" && python3 "${SRT_VV_SCRIPT:-$HOME/dev/vibevoice-poc/vibevoice
     "${VIDEO_DIR}/<影片或音檔名>" \
     --terms "${TERMS}" \
     --terms-max 50 \
-    ${SLIDE_TERMS:+--slide-terms "${SLIDE_TERMS}" --slide-terms-max 25} \
     --json \
     --output "${VIDEO_DIR}/<檔名>_vibevoice.srt"
 ```
 
-> `SLIDE_TERMS="${VIDEO_DIR}/<檔名>_slide_terms.txt"` 若 Step 0.5 有產出就設它，讓 VV 在 ASR 階段就注入本集螢幕英文 ticker/公司名（slide 優先、保留講者詞配額）；沒有則留空、行為不變。
+> ⚠️ **不要自動把 raw `_slide_terms.txt` 傳給 VV 的 `--slide-terms`**：2026-07-11 e2e 實測，`srt_extract_slides.py` 原始 OCR 輸出含噪音（亂碼/UI 文字/通用中文詞），餵進 VV context 會**拉低**英文專有名詞辨識（F1 0.45→0.41），比手工乾淨術語（+0.11）反向。`vibevoice_asr.py --slide-terms` CLI 能力保留供未來「sanitized + 全片排名術語表」使用；在有淨化層＋多影片 ablation 證明 ≥ baseline 前，pipeline 不自動注入。詳 wiki `asr-model-evaluation`。
 
 **長音檔（> 55 分鐘）— 用 `vv_longaudio.py` 自動切段：**
 
@@ -224,7 +223,6 @@ cd "${VIDEO_DIR}" && python3 "${SRT_VV_SCRIPT:-$HOME/dev/vibevoice-poc/vibevoice
 cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/vv_longaudio.py" \
     "${VIDEO_DIR}/<影片或音檔名>" \
     --terms "${TERMS}" --terms-max 50 \
-    ${SLIDE_TERMS:+--slide-terms "${SLIDE_TERMS}" --slide-terms-max 25} \
     --output-json "${VIDEO_DIR}/<檔名>_vibevoice.json" \
     --output-srt "${VIDEO_DIR}/<檔名>_vibevoice.srt"
 ```
