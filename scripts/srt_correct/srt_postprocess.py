@@ -10,7 +10,7 @@ srt_postprocess.py — LLM 校正後的驗證和修復
   4. 產出品質報告（含仍超長條目數，供人工檢視）
 
 用法:
-    python3 srt_postprocess.py input.srt [output.srt] [--stats] [--ref preprocessed.srt] [--terms terms.txt]
+    python3 srt_postprocess.py input.srt [output.srt] [--stats] [--strict] [--ref preprocessed.srt] [--terms terms.txt]
 """
 
 import re
@@ -24,6 +24,11 @@ jieba.initialize()
 MAX_CHAR_LEN = 20
 
 SPLIT_CONNECTORS = ["然後", "所以", "但是", "可是", "而且", "不過", "因為", "如果", "或者", "甚至"]
+
+TOOL_CALL_RESIDUE_RE = re.compile(
+    r'^</?(?:invoke|content|parameter|function_calls|antml:[a-z_]+)\b[^>]*>$',
+    re.IGNORECASE,
+)
 
 
 def ts_to_ms(ts):
@@ -63,6 +68,25 @@ def parse_srt(path):
             "text": text,
         })
     return entries
+
+
+def strip_tool_call_residue(entries):
+    """Remove pure tool-call tag lines and return their count and unrecoverable cues."""
+    stripped_count = 0
+    residue_only_timecodes = []
+    for entry in entries:
+        lines = entry["text"].splitlines()
+        kept = [line for line in lines if not TOOL_CALL_RESIDUE_RE.fullmatch(line.strip())]
+        removed = len(lines) - len(kept)
+        if not removed:
+            continue
+        stripped_count += removed
+        entry["text"] = '\n'.join(kept)
+        if not entry["text"].strip():
+            residue_only_timecodes.append(
+                f"{ms_to_ts(entry['start_ms'])} --> {ms_to_ts(entry['end_ms'])}"
+            )
+    return stripped_count, residue_only_timecodes
 
 
 def _is_in_english_word(text, pos):
@@ -398,12 +422,16 @@ def restore_timecodes(corrected, ref_entries):
 def main():
     args = sys.argv[1:]
     show_stats = "--stats" in args
+    strict = "--strict" in args
     ref_path = None
     terms_path = None
     clean_args = []
     i = 0
     while i < len(args):
         if args[i] == "--stats":
+            i += 1
+            continue
+        if args[i] == "--strict":
             i += 1
             continue
         if args[i] == "--ref" and i + 1 < len(args):
@@ -419,7 +447,7 @@ def main():
     args = clean_args
 
     if not args:
-        print("用法: python3 srt_postprocess.py input.srt [output.srt] [--stats] [--ref preprocessed.srt] [--terms terms.txt]", file=sys.stderr)
+        print("用法: python3 srt_postprocess.py input.srt [output.srt] [--stats] [--strict] [--ref preprocessed.srt] [--terms terms.txt]", file=sys.stderr)
         sys.exit(1)
 
     input_path = args[0]
@@ -541,6 +569,9 @@ def main():
         if new_entries[i]["end_ms"] > new_entries[i + 1]["start_ms"]:
             new_entries[i]["end_ms"] = new_entries[i + 1]["start_ms"]
 
+    # ponytail: Scan twice to leave force_split untouched; consolidate if passes become residue-aware.
+    stripped_residue_count, residue_only_timecodes = strip_tool_call_residue(new_entries)
+
     # Pass 4: 拆分超長字幕（Sonnet 校正後可能產生合併導致的超長條目）
     split_count = 0
     split_entries = []
@@ -550,6 +581,21 @@ def main():
             split_count += 1
         split_entries.extend(parts)
     new_entries = split_entries
+
+    final_stripped_count, final_residue_only_timecodes = strip_tool_call_residue(new_entries)
+    stripped_residue_count += final_stripped_count
+    residue_only_timecodes.extend(final_residue_only_timecodes)
+    if stripped_residue_count:
+        warning = (
+            f"⚠ TOOL-CALL RESIDUE: stripped {stripped_residue_count} lines, "
+            f"{len(residue_only_timecodes)} cues with residue-only text "
+            "(需人工從 ASR 復原)"
+        )
+        if residue_only_timecodes:
+            warning += ": " + ", ".join(residue_only_timecodes)
+        print(warning, file=sys.stderr)
+        if strict and residue_only_timecodes:
+            sys.exit(2)
 
     # 輸出
     still_over = sum(1 for e in new_entries if len(e["text"]) > MAX_CHAR_LEN)

@@ -187,3 +187,93 @@ class TestSrtCorrectPostprocessTermsCli:
         assert proc.returncode == 0
         assert "WARNING" in proc.stderr
         assert out.exists()
+
+
+class TestSrtCorrectToolCallResidueCli:
+    """Test fail-loud tool-call residue handling in srt_correct postprocessing."""
+
+    @staticmethod
+    def run_cli(srt, out, *args):
+        import subprocess
+        import sys
+
+        script = Path(__file__).resolve().parents[1] / "scripts" / "srt_correct" / "srt_postprocess.py"
+        return subprocess.run(
+            [sys.executable, str(script), str(srt), str(out), *args],
+            text=True,
+            capture_output=True,
+        )
+
+    def test_strips_residue_lines_from_multiline_cue(self, tmp_path):
+        srt = tmp_path / "in.srt"
+        out = tmp_path / "out.srt"
+        srt.write_text(textwrap.dedent("""\
+            1
+            00:00:01,000 --> 00:00:03,000
+            好
+            </INVOKE>
+            </content>
+            <parameter name="some_really_long_parameter_name">
+        """), encoding="utf-8")
+
+        proc = self.run_cli(srt, out, "--strict")
+
+        assert proc.returncode == 0
+        assert "⚠ TOOL-CALL RESIDUE: stripped 3 lines, 0 cues" in proc.stderr
+        assert "好\n" in out.read_text(encoding="utf-8")
+        assert "</INVOKE>" not in out.read_text(encoding="utf-8")
+
+    def test_warns_and_keeps_residue_only_cue_empty(self, tmp_path):
+        srt = tmp_path / "in.srt"
+        out = tmp_path / "out.srt"
+        srt.write_text(textwrap.dedent("""\
+            1
+            00:00:04,000 --> 00:00:06,000
+            <antml:function_calls>
+        """), encoding="utf-8")
+
+        proc = self.run_cli(srt, out)
+
+        assert proc.returncode == 0
+        assert "stripped 1 lines, 1 cues with residue-only text" in proc.stderr
+        assert "00:00:04,000 --> 00:00:06,000" in proc.stderr
+        assert out.read_text(encoding="utf-8") == (
+            "1\n00:00:04,000 --> 00:00:06,000\n\n\n"
+        )
+
+    def test_does_not_match_normal_text_or_other_angle_brackets(self, tmp_path):
+        srt = tmp_path / "in.srt"
+        out = tmp_path / "out.srt"
+        content = textwrap.dedent("""\
+            1
+            00:00:01,000 --> 00:00:03,000
+            This is (normal)
+
+            2
+            00:00:04,000 --> 00:00:06,000
+            <speaker>hello</speaker>
+
+        """)
+        srt.write_text(content, encoding="utf-8")
+
+        proc = self.run_cli(srt, out)
+
+        assert proc.returncode == 0
+        assert "TOOL-CALL RESIDUE" not in proc.stderr
+        assert out.read_text(encoding="utf-8") == content
+
+    def test_strict_exits_nonzero_for_residue_only_cue(self, tmp_path):
+        srt = tmp_path / "in.srt"
+        out = tmp_path / "out.srt"
+        srt.write_text(textwrap.dedent("""\
+            1
+            00:00:07,000 --> 00:00:09,000
+            <parameter name="query">
+        """), encoding="utf-8")
+
+        proc = self.run_cli(srt, out, "--strict")
+
+        assert proc.returncode != 0
+        assert "stripped 1 lines, 1 cues with residue-only text" in proc.stderr
+        assert "00:00:07,000 --> 00:00:09,000" in proc.stderr
+        assert not out.exists()
