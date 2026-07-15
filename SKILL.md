@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.4.2
+version: 1.5.0
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -168,10 +168,11 @@ cp "<原始路徑>" "${VIDEO_DIR}/"
 
 **如果用戶提供了投影片檔**，跳過自動擷取，直接用該檔作為全局術語表（舊行為）：
 - `.txt`（純文字）→ 直接當術語表用
-- `.pptx` / `.ppt`（PowerPoint）→ 用 `srt_extract_slides.py` 直接抽文字（遞迴 group/table/text_frame + 備註，去重），跳過 ffmpeg/dedup/VLM：
+- `.pptx` / `.ppt`（PowerPoint）→ 用 `srt_extract_slides.py` 抽**兩層**：OOXML 文字（遞迴 group/table/text_frame + 備註，去重）＋內嵌圖片的 RapidOCR 文字。跳過 ffmpeg/幀去重/VLM：
   ```bash
   python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pptx>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt"
   ```
+  輸出含 `# 螢幕 OCR 文字（原始）` 區塊（僅在有圖且 OCR 成功時）。**圖片層不可省**：K 線／看盤截圖裡的 ticker 與指標名在 XML 完全不存在（2026-07-15 實測 `67月.pptx`：8 圖補回 152 行，PLTR／MA300DIST／CME_MINI／NASDAQ／NQ／EURUSD 只在像素層）。RapidOCR 未安裝或 OCR 失敗只印 warning、照常輸出 XML 文字（OCR 是加分不是必需）。成本約 1 秒/圖。
 
 **自動擷取**（無投影片文字檔時）：
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.0 - 2026-07-16
+
+### 新增
+- **`.pptx` 抽術語補上圖片 OCR**。事故：pptx 路徑只讀 OOXML 文字層，**圖片像素層一個字都沒抽**。投影片的資訊有兩層（XML 文字 + 圖片像素），2026-04-12 補了 `has_table` 之後就默認「抽全了」——其實只抽全了 XML 側。實測 `67月.pptx`（21 頁、8 張 K 線／看盤截圖）：PLTR、MA300DIST、CME_MINI、NASDAQ、NQ、EURUSD **全部只存在於圖片裡**，純文字抽取 100% 漏掉，而這些正是 ASR 最容易聽錯、最需要 ground truth 的詞。
+- `extract_pptx_text()` 走訪 shapes 時把圖片 `shape.image.blob` 寫進暫存檔，丟給腳本**已有的** `ocr_with_rapidocr()`（影片路徑在用的同一支），回傳改為 `(xml_lines, ocr_lines, image_count)`；輸出新增 `# 螢幕 OCR 文字（原始）` 區塊，OCR 行與 XML 行共用去重。實測 8 圖 152 行、約 1 秒/圖，XML 側 97 行**逐字不變**。
+- 三個實作要點：圖片判斷用 `getattr(sh, "image", None)` 而非硬比 `shape_type == 13`（group 內的圖同樣要吃到）；**OCR 失敗只 warn 不 hard-fail**（pptx 路徑原本不依賴 rapidocr，加了 OCR 不得讓沒裝的環境連術語都抽不出來）；`.pptx` 分支是獨立寫檔，不走影片路徑的 `write_terms_file()`。
+- 對拍結論：這不是 python-pptx 的缺陷，**換 OfficeCLI 也一樣**（v1.0.136 實測純文字抽取 269/271 token 交集，等價）——兩者都只讀 OOXML，都看不到像素。**缺的是 OCR 那一段，不是 pptx 解析庫。**
+
+> 走 `/dispatch`（classifier → packet → codex worker → 主 session 自跑 VERIFICATION → review 清掉 function-attribute 側通道）。派工前驗前提抓到兩個會誤導 worker 的錨：skill 是 symlink → 真 repo 在 `~/dev/srt-skill`（WRITE SCOPE 得用該 repo 的 repo-relative 路徑）；教訓檔寫的「併進 `# 螢幕 OCR 文字（原始）` 區塊」其實是影片路徑的區塊，pptx 分支上並不存在。
+
 ## 1.4.2 - 2026-07-08
 
 ### 修復

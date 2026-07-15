@@ -30,6 +30,7 @@ YouTube link OR local video/audio
 
 Design highlights:
 - **Two-ASR cross-reference** — a primary ASR plus an optional VibeVoice pass; the LLM uses both to fix English terms and homophones.
+- **Two-layer slide extraction** — a `.pptx` input is read on both layers: the OOXML text *and* the pixels of its embedded images. Chart screenshots routinely carry tickers and indicator names that appear nowhere in the XML, so text-only extraction misses them silently. OCR failure degrades to a warning — term extraction never hard-fails on it.
 - **Structural quality gate** — the merge step rejects over-merged segments and auto-retries.
 - **Fail-loud ASR** — if the ASR step yields an empty/0-byte SRT (a known `mlx_whisper` `KeyError: 'words'` writer bug that discards output despite a successful transcription), the pipeline reconstructs the SRT from the captured verbose stdout, or hard-fails — it never silently reports success on an empty subtitle.
 - **Strict stage-readiness** — background stages (ASR, VibeVoice, OCR) are launched so the harness tracks the real process, and completion is confirmed by a strict artifact check (`check_stage_artifacts.py`: valid SRT cues / VV segments / caption shape, newer than a launch marker) rather than by file existence or a possibly-lost notification. A silent or missing signal is re-checked, never waited on indefinitely.
@@ -114,6 +115,7 @@ YouTube 連結 或 本地影片／音檔
 
 設計重點：
 - **雙路 ASR 交叉參考** — 主 ASR 加上選用的 VibeVoice；LLM 用兩者一起修正英文術語與同音字。
+- **投影片雙層抽取** — `.pptx` 輸入會同時讀兩層：OOXML 文字層**與**內嵌圖片的像素層。K 線截圖裡常有 XML 完全沒有的 ticker 與指標名，只抽文字會靜默漏掉。OCR 失敗降級為 warning——不會讓術語抽取整個掛掉。
 - **結構性品質 gate** — 合併步驟會擋下過度合併的段落並自動重派。
 - **ASR 失敗會出聲** — 若 ASR 步驟產出空／0-byte SRT（mlx_whisper 已知的 `KeyError: 'words'` 寫檔 bug：辨識其實成功卻丟棄輸出），pipeline 會從捕獲的 verbose stdout 重建 SRT，否則直接 hard-fail——絕不對空字幕靜默回報成功。
 - **嚴格階段就緒檢查** — 背景階段（ASR、VibeVoice、OCR）以「讓 harness 追蹤真進程」的方式啟動，完成以 strict 產物檢查（`check_stage_artifacts.py`：有效 SRT 時軸／VV segment／caption 形狀、且 newer than launch marker）確認，而非靠檔案存在或可能遺失的通知。沉默或缺席的訊號一律回查，絕不無限等待。

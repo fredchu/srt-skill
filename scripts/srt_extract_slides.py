@@ -509,7 +509,7 @@ def write_terms_file(terms: dict, output_path: str):
         f.write("\n".join(lines))
 
 
-def extract_pptx_text(pptx_path: str) -> list[str]:
+def extract_pptx_text(pptx_path: str) -> tuple[list[str], list[str], int]:
     """Extract text lines from PowerPoint slides, tables, and speaker notes."""
     try:
         from pptx import Presentation
@@ -519,6 +519,8 @@ def extract_pptx_text(pptx_path: str) -> list[str]:
 
     prs = Presentation(pptx_path)
     lines = []
+    images = []
+    slide_number = 0
 
     def add_line(text: str):
         text = text.strip()
@@ -531,6 +533,10 @@ def extract_pptx_text(pptx_path: str) -> list[str]:
                 walk_shapes(sh.shapes)
                 continue
 
+            image = getattr(sh, "image", None)
+            if image is not None:
+                images.append((slide_number, image))
+
             if getattr(sh, "has_table", False):
                 for row in sh.table.rows:
                     cells = [cell.text.strip() for cell in row.cells]
@@ -542,7 +548,7 @@ def extract_pptx_text(pptx_path: str) -> list[str]:
                 for para in sh.text_frame.paragraphs:
                     add_line("".join(run.text for run in para.runs))
 
-    for slide in prs.slides:
+    for slide_number, slide in enumerate(prs.slides, 1):
         walk_shapes(slide.shapes)
         if slide.has_notes_slide:
             add_line(slide.notes_slide.notes_text_frame.text)
@@ -554,7 +560,38 @@ def extract_pptx_text(pptx_path: str) -> list[str]:
             seen.add(line)
             unique_lines.append(line)
 
-    return unique_lines
+    ocr_lines = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        frames = []
+        image_numbers = {}
+        for slide_number, image in images:
+            image_numbers[slide_number] = image_numbers.get(slide_number, 0) + 1
+            try:
+                image_path = os.path.abspath(os.path.join(
+                    tmpdir,
+                    f"slide{slide_number:03d}_img{image_numbers[slide_number]}.{image.ext}",
+                ))
+                with open(image_path, "wb") as f:
+                    f.write(image.blob)
+                frames.append((image_path, float(slide_number)))
+            except Exception as exc:
+                _warn(f"PowerPoint image extraction failed on slide {slide_number}: {exc}")
+
+        if frames:
+            try:
+                results = ocr_with_rapidocr(frames)
+            except RuntimeError as exc:
+                _warn(f"PowerPoint image OCR failed: {exc}")
+                results = []
+
+            for result in results:
+                for line in result.get("raw", "").splitlines():
+                    line = line.strip()
+                    if line and line not in seen:
+                        seen.add(line)
+                        ocr_lines.append(line)
+
+    return unique_lines, ocr_lines, len(frames)
 
 
 def main():
@@ -588,16 +625,20 @@ def main():
         if args.caption:
             print("pptx 無時間戳，忽略 --caption，只輸出 _slide_terms.txt", file=sys.stderr)
 
-        lines = extract_pptx_text(video_path)
+        xml_lines, ocr_lines, image_count = extract_pptx_text(video_path)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("# 本集投影片術語（pptx 抽取：標題/內文/表格/備註）\n")
             f.write(f"# 抽取時間: {time.strftime('%Y-%m-%d %H:%M')}\n")
             f.write("\n")
-            f.write("\n".join(lines))
+            f.write("\n".join(xml_lines))
+            if ocr_lines:
+                f.write("\n\n# 螢幕 OCR 文字（原始）\n")
+                f.write("\n".join(ocr_lines))
 
         print("\n=== Done (PowerPoint mode) ===", file=sys.stderr)
         print(f"  Slides: {video_path}", file=sys.stderr)
-        print(f"  Extracted lines: {len(lines)}", file=sys.stderr)
+        print(f"  Extracted lines: {len(xml_lines)}", file=sys.stderr)
+        print(f"  OCR lines: {len(ocr_lines)} (from {image_count} images)", file=sys.stderr)
         print(f"  Output: {output_path}", file=sys.stderr)
         return
 
