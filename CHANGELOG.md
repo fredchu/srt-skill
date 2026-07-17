@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.1 - 2026-07-17
+
+### 修復
+- **`hallucination_fallback.sh` bash 引號 KeyError**。patch 段 Python 包在 `python3 -c "..."` 雙引號裡，f-string 的 `e["text"]` 內層引號被 bash 剝掉，Python 實收 `e[text]`——`text` 恰好殘留迴圈變數（最後一條字幕文字），炸出以字幕內容為 key 的詭異 `KeyError`。錯誤訊息指向資料、defect 在 shell quoting。修法：先取 `txt = e['text']` 再進 f-string。
+- **Whisper fallback 補丁區時間戳漂移 2-4 秒**。`mlx_whisper` 不帶 `--word-timestamps` 時 segment 級時間戳在補丁窗口內整體提早（實測 34 秒窗口漂 2.5-4s），單調性／重疊／條數等自動驗證全過，只有人工看片抓得到（字幕提早出現）。改為預設帶 `--word-timestamps True`（word 對齊重定 segment 邊界），並與 VibeVoice 獨立時間軸對拍驗證。
+
+### 變更
+- **SKILL.md 立「ASR 補丁區人工抽查」制度**：Step 1.5 的 Breeze 自動修復區與 Whisper fallback 區（同為截音檔獨立重跑＋偏移縫合）必記起止時間，完成後回報逐段列出、明確提醒用戶播放確認——補丁區是全片時間軸風險最高處。
+- preprocess 新增 10 條 Breeze 同音字規則（FOMC、權值股、事件交易、關鍵價、週假摔、逃頂、泡沫掉等，出自技術分析-6月-03/04 術語學習）。
+- README（英／繁）新增 Patch-region disclosure 設計說明。
+
 ## 1.5.0 - 2026-07-16
 
 ### 新增
