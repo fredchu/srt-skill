@@ -278,6 +278,8 @@ python3 "${CORRECT_DIR}/srt_hallucination_fix.py" "<ASR 產出的 SRT>" "${VIDEO
 
 腳本會自動處理，無需人工介入。如果二次 ASR 仍是幻覺，會印 WARNING 跳過。
 
+**從腳本輸出記下每個「已修復」區段的起止時間**——這些 Breeze 自動修復區與 Whisper fallback 區同屬 ASR 補丁區，完成後回報要逐段列出提醒用戶人工抽查（見「完成後回報」）。
+
 **Fallback：換 Whisper large-v3 重跑**。檢查 srt_hallucination_fix.py 的輸出，如果有「多次重試仍失敗」的 WARNING，不要跳過 — 用 `scripts/hallucination_fallback.sh` 自動改用 Whisper large-v3 重跑。Breeze 對特定段落會反覆產生相同幻覺，換模型通常能解決。
 
 對每個 WARNING 跳過的幻覺段：
@@ -292,6 +294,8 @@ SKILL_DIR="$(dirname "$(readlink -f "$0")")"  # 或直接用 skill 路徑
 ```
 
 腳本會自動完成：截取音檔 → Whisper large-v3 重跑 → 時間偏移 → patch 回 SRT → 清理暫存。如果 Whisper 結果仍為幻覺，會印 WARNING 跳過（該段可能真的是靜音/音樂）。
+
+**每次 fallback 補丁都要記下起止時間區間**，pipeline 完成後回報時列出並提醒用戶人工抽查（見「完成後回報」）。補丁區是獨立 ASR 跑分＋偏移計算＋邊界縫合，時間軸漂移與邊界重複只有人工看片抓得到（2026-07-17 技術分析-6月-03 27:19-27:53 實例：段級時間戳整體提早 2.5-4 秒、尾端與 Breeze 殘留重複，自動驗證全數通過仍漏接）。
 
 完成後如果已有字幕影片（`_sub.mkv`），刪掉舊的並用 ffmpeg 重新合併。
 
@@ -741,6 +745,7 @@ rm -f "${VIDEO_DIR}/<影片檔名同名>.wav"
 - 產出檔案路徑（含字幕影片路徑，如有）
 - ASR 字幕段數 → 預處理後段數 → 校正後段數
 - 名詞查證摘要（Step 2d：查證 N／修正 M／未收斂 L3 數／溢出 O／丟棄 stale sidecar 數；有修正時附逐條 mapping＋證據層級、未收斂項附候選與理由；零 sidecar 則「無可疑名詞」）
+- **ASR 補丁區（如有）：逐段列出起止時間，明確提醒用戶播放該區段人工確認時間軸與內容銜接**——含 Step 1.5 的 Breeze 自動修復區與 Whisper fallback 區，兩者機制相同（截音檔獨立重跑＋偏移計算 patch 回去），是全片時間軸風險最高處，自動驗證抓不到整體漂移（沒有補丁則不用提）
 - 術語學習結果：新增了哪些術語/preprocess 規則，或「無新術語」
 - 總耗時
 

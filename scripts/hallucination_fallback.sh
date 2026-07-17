@@ -33,6 +33,9 @@ WHISPER_ARGS=(
   --task transcribe
   --temperature 0
   --condition-on-previous-text False
+  # word-level 對齊重定 segment 邊界；缺了它 segment 時間戳會漂移 2-4 秒
+  # （2026-07-17 技術分析-6月-03 27:19-27:53 補丁區實測，字幕提早出現）
+  --word-timestamps True
   --output-format srt
   --output-name "_fix_segment"
   --output-dir "$WORK_DIR"
@@ -171,7 +174,8 @@ for i, e in enumerate(parsed):
         m = ms // 60000; ms %= 60000
         s = ms // 1000; mss = ms % 1000
         return f'{h:02d}:{m:02d}:{s:02d},{mss:03d}'
-    final_blocks.append(f'{i+1}\n{ms_fmt(s_ms)} --> {ms_fmt(e_ms)}\n{e["text"]}')
+    txt = e['text']
+    final_blocks.append(f'{i+1}\n{ms_fmt(s_ms)} --> {ms_fmt(e_ms)}\n{txt}')
 seq = len(parsed) + 1
 
 with open(SRT_FILE, 'w') as f:
