@@ -457,7 +457,7 @@ done
    - 成功：stdout 印 JSON metrics（entries / patched / per_segment ratio / max_dur_sec / over_12s_count），exit 0
    - gate FAIL：不寫輸出，stdout 印 `{"gate": "fail", "failed_segments": [...]}`，**exit 2**
 
-   **exit 2 時的處理**：對每個 failed segment 重派校正 subagent（同一段、同樣的 prompt），並在 prompt「重要」清單最前面追加一行：「**上一輪輸出只有 <output> 條（原始 <input> 條），嚴重過度合併。這次必須逐條校正，輸出條數 ≥ <input×0.9> 條**」。**重派前先刪該段舊 sidecar：`rm -f <工作目錄>/_seg_<N>_uncertain.json`**（防上一輪殘留的可疑名詞清單被 Step 2d 誤採；hash 綁定是第二道保險）。重派完成後重跑合併腳本。
+   **exit 2 時的處理**：對每個 failed segment 按 `reasons` 組裝提示後重派校正 subagent（同一段、同樣的 prompt）。含 `ratio` 時，在 prompt「重要」清單最前面追加：「**上一輪輸出只有 <output> 條（原始 <input> 條），嚴重過度合併。這次必須逐條校正，輸出條數 ≥ <input×0.9> 條**」；含 `zero_duration` 時追加：「**上一輪輸出含捏造/零時長時間軸（例：<zero_dur_examples>），這次必須沿用原始每條時間軸，禁止細分或位移**」；含 `dup_text` 時追加：「**上一輪把其他位置的內容複製進本段造成重複（例：<dup_examples>），這次嚴禁輸出原始 <input> 條以外的任何內容**」。**重派前先刪該段舊 sidecar：`rm -f <工作目錄>/_seg_<N>_uncertain.json`**（防上一輪殘留的可疑名詞清單被 Step 2d 誤採；hash 綁定是第二道保險）。重派完成後重跑合併腳本。
 
 #### Step 2c: 複查 pass + 後處理
 

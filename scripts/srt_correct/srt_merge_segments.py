@@ -6,6 +6,7 @@ import glob
 import json
 import re
 import sys
+from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -69,6 +70,23 @@ def max_duration_sec(entries):
     return max(max(0, entry["end_ms"] - entry["start_ms"]) for entry in entries) / 1000.0
 
 
+def entry_text(entry):
+    return "\n".join(entry["text_lines"])
+
+
+def dup_keys(entries, min_chars):
+    occurrences = {}
+    for i, entry in enumerate(sorted(entries, key=lambda item: (item["start_ms"], item["end_ms"]))):
+        key = re.sub(r"[\W_]", "", entry_text(entry))
+        if len(key) >= min_chars:
+            occurrences.setdefault(key, []).append((i, entry_text(entry)))
+    return {
+        key: items
+        for key, items in occurrences.items()
+        if len(items) >= 2 and items[-1][0] - items[0][0] >= 2
+    }
+
+
 def collect_corrected_files(workdir):
     files = glob.glob(str(Path(workdir) / "_seg_*_corrected.srt"))
     return sorted(files, key=lambda f: int(re.search(r"_seg_(\d+)", f).group(1)))
@@ -97,11 +115,52 @@ def gate_segments(args, corrected_files):
         }
         per_segment.append(item)
 
+        reasons = []
         if ratio < args.gate_ratio_fail or (
             ratio < args.gate_ratio_warn and max_dur > args.gate_max_dur_sec
         ):
+            reasons.append("ratio")
+
+        input_zero = Counter(
+            (entry["start_ms"], entry["end_ms"])
+            for entry in input_entries
+            if entry["end_ms"] <= entry["start_ms"]
+        )
+        output_zero = Counter(
+            (entry["start_ms"], entry["end_ms"])
+            for entry in output_entries
+            if entry["end_ms"] <= entry["start_ms"]
+        )
+        new_zero = output_zero - input_zero
+        if new_zero:
+            reasons.append("zero_duration")
+            item["zero_dur_examples"] = [
+                f"{ms_to_ts(start)} --> {ms_to_ts(end)}"
+                for (start, end), count in new_zero.items()
+                for _ in range(count)
+            ][:5]
+
+        new_dups = []
+        if args.gate_dup_min_chars:
+            input_counts = Counter(
+                re.sub(r"[\W_]", "", entry_text(entry)) for entry in input_entries
+            )
+            for key, occurrences in dup_keys(output_entries, args.gate_dup_min_chars).items():
+                new_extra = max(0, len(occurrences) - max(1, input_counts[key]))
+                if new_extra:
+                    new_dups.append((occurrences[0][1], new_extra))
+        if len(new_dups) >= args.gate_dup_min_texts or any(
+            new_extra >= args.gate_dup_min_texts for _, new_extra in new_dups
+        ):
+            reasons.append("dup_text")
+            item["dup_examples"] = [text for text, _ in new_dups[:5]]
+
+        if reasons:
+            item["reasons"] = reasons
             failed.append(item)
-        elif ratio < args.gate_ratio_warn:
+        elif ratio < args.gate_ratio_warn or len(new_dups) == 1:
+            if len(new_dups) == 1:
+                item["dup_warn"] = [new_dups[0][0]]
             warned.append(item)
 
     return failed, warned, per_segment
@@ -128,6 +187,7 @@ def coverage_patch(entries, preprocessed_path):
                 in_gap = True
                 break
         if in_gap:
+            pre_entry["seg"] = None
             entries.append(pre_entry)
             merged_starts.add(pre_entry["start_ms"])
             patched += 1
@@ -147,6 +207,29 @@ def write_srt(entries, output_path):
             f.write("\n\n")
 
 
+def cross_dup_count(entries, min_chars):
+    if not min_chars:
+        return 0
+    positions = {}
+    for i, entry in enumerate(entries):
+        key = re.sub(r"[\W_]", "", entry_text(entry))
+        if len(key) >= min_chars:
+            positions.setdefault(key, []).append(i)
+
+    count = 0
+    for indexes in positions.values():
+        for offset, left in enumerate(indexes):
+            for right in indexes[offset + 1:]:
+                if (
+                    right - left == 1
+                    and entries[left].get("seg") == entries[right].get("seg")
+                    and entries[left].get("seg") is not None
+                ):
+                    continue
+                count += 1
+    return count
+
+
 def merge(args):
     corrected_files = collect_corrected_files(args.workdir)
     failed, warned, per_segment = gate_segments(args, corrected_files)
@@ -156,7 +239,11 @@ def merge(args):
 
     entries = []
     for path in corrected_files:
-        entries.extend(parse_strict_blocks(path, repair_repeated_lines=True))
+        n = int(re.search(r"_seg_(\d+)_corrected\.srt$", path).group(1))
+        segment_entries = parse_strict_blocks(path, repair_repeated_lines=True)
+        for entry in segment_entries:
+            entry["seg"] = n
+        entries.extend(segment_entries)
 
     entries.sort(key=lambda entry: entry["start_ms"])
     clamp_end_times(entries)
@@ -164,6 +251,17 @@ def merge(args):
 
     entries.sort(key=lambda entry: entry["start_ms"])
     clamp_end_times(entries)
+    merged_zero_dur_count = sum(
+        1 for entry in entries if entry["end_ms"] <= entry["start_ms"]
+    )
+    merged_cross_dup_count = cross_dup_count(entries, args.gate_dup_min_chars)
+    if merged_zero_dur_count or merged_cross_dup_count:
+        print(
+            "WARNING: merged output contains "
+            f"{merged_zero_dur_count} zero-duration entries and "
+            f"{merged_cross_dup_count} duplicate-text pairs",
+            file=sys.stderr,
+        )
     write_srt(entries, args.output)
 
     durations = [(entry["end_ms"] - entry["start_ms"]) / 1000.0 for entry in entries]
@@ -178,12 +276,26 @@ def merge(args):
         ],
         "max_dur_sec": round(max(durations) if durations else 0.0, 3),
         "over_12s_count": sum(1 for duration in durations if duration > 12),
+        "merged_zero_dur_count": merged_zero_dur_count,
+        "cross_dup_count": merged_cross_dup_count,
     }
     print(json.dumps(metrics, ensure_ascii=False))
     return 0
 
 
 def main():
+    def nonnegative(value):
+        parsed = int(value)
+        if parsed < 0:
+            raise argparse.ArgumentTypeError("must be >= 0")
+        return parsed
+
+    def positive(value):
+        parsed = int(value)
+        if parsed < 1:
+            raise argparse.ArgumentTypeError("must be >= 1")
+        return parsed
+
     parser = argparse.ArgumentParser(description="Merge corrected SRT segments with quality gates.")
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--preprocessed", required=True)
@@ -192,6 +304,8 @@ def main():
     parser.add_argument("--gate-ratio-fail", type=float, default=0.55)
     parser.add_argument("--gate-ratio-warn", type=float, default=0.80)
     parser.add_argument("--gate-max-dur-sec", type=float, default=15)
+    parser.add_argument("--gate-dup-min-chars", type=nonnegative, default=10)
+    parser.add_argument("--gate-dup-min-texts", type=positive, default=2)
     sys.exit(merge(parser.parse_args()))
 
 
