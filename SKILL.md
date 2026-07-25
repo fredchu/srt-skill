@@ -655,8 +655,9 @@ done
 校正 subagent 只標記不查證（它們刻意離線）。本步在 `_2c_final.srt` 產出後、Step 4 壓字幕**之前**執行——聚合 sidecar、查證、修 final srt：
 
 1. **聚合＋新鮮度檢查（deterministic）**：收集 `_seg_*_uncertain.json`；逐檔重算對應 `_seg_N_corrected.srt` 的 SHA-256 與 envelope 的 `corrected_sha256` 比對——**corrected 檔不存在、缺 hash 欄位、或 hash 不符 → 丟棄該 sidecar 並警示**（stale 殘留）。通過者以 normalized term 去重聚合。零 sidecar → 本步結束（no-op）。
+   **「聲稱保留」逐條 grep 確認**：sidecar 與校正/複查 subagent 回報中每一條「存疑但保留原樣」的條目，都要拿**原文**（term＋context）grep final SRT 確認真的還在——grep 不到＝subagent 回報與檔案不符（實際已改），比對 `_seg_N_corrected.srt` 找出實際套用的版本，語意反轉或單路證據的改動按契約回退為 ASR 原文並列報告（2026-07-25 技術分析-7月-05 實例：段 9 回報「保留」實已套 VV 反義版「我不能很黏」，靠此 grep 抓到）。
 2. **四層查證**（同 speech-to-prose Step 3.5，證據不足寧可不改）：
-   - **L0 全文內部交叉比對（最優先）**：`python3 "$SP_DIR/scripts/noun_xref.py" --term "<詞>" ... <_2c_final.srt> <ASR 原始 srt> <_vibevoice.srt> --json`（`SP_DIR=~/.claude/skills/speech-to-prose`），LLM 判讀候選段落語境是否指向同一實體（實例：KISS 在他處被聽對成 keys）
+   - **L0 全文內部交叉比對（最優先）**：`python3 "$SP_DIR/scripts/noun_xref.py" --term "<詞>" ... <_2c_final.srt> <ASR 原始 srt> <_vibevoice.srt> --json`（`SP_DIR=~/.claude/skills/speech-to-prose`），LLM 判讀候選段落語境是否指向同一實體（實例：KISS 在他處被聽對成 keys）。**xref 必須對「錯詞＋每個 guess 候選」都跑**，不能只搜錯詞：候選在全片他處以雙路一致形式出現即為有效收斂證據（2026-07-25 技術分析-7月-04 實例：「棄牌」xref 無果判 L3，但候選「技法」在同片 00:19:44 已正確出現；「市值關卡」有兩處「市值」雙路一致佐證——證據都在，只因未搜候選側而漏接，最後靠用戶裁決）
    - **L1 本地**：講者 terms 檔、`_slide_terms.txt`（畫面 OCR 是 ground truth）、wiki
    - **L2 中性 WebSearch**：query 只准用上下文關鍵詞、**禁止放入猜測答案**（防確認偏誤）；得候選清單後才驗音近
    - **L3 未收斂**：字幕原樣不改、記入報告（**與 speech-to-prose 的〔註〕標記刻意不同**：字幕是螢幕顯示格式、校正契約嚴禁 commentary 入字幕，未收斂項的候選與理由一律進報告讓用戶決定）
