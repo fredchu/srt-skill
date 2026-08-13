@@ -17,8 +17,9 @@ Give it a YouTube link or a local video/audio file. It runs a fully-automated pi
 YouTube link OR local video/audio
   ↓ Step 0  (YouTube only)  yt-dlp download
   ↓ Step 0.5 (optional)     slide/frame caption extraction for visual context
-  ├─ Step 1                 ASR  (Breeze / Whisper)        ┐ run in parallel
-  └─ Step 1'                VibeVoice ASR (optional)        ┘ cross-reference
+  ↓ Step 1                  ASR  (Breeze / Whisper)
+  ↓ Step 1'                 VibeVoice ASR (optional)  — run AFTER Step 1, not in parallel
+                            (both extract to the same <video>.wav; see note below)
   ↓ Step 1.5                ASR hallucination detect + auto-fix
   ↓ Step 2a                 mechanical preprocessing
   ↓ Step 2b                 segmented LLM correction (Claude subagents, or local Ollama)
@@ -29,7 +30,7 @@ YouTube link OR local video/audio
 ```
 
 Design highlights:
-- **Two-ASR cross-reference** — a primary ASR plus an optional VibeVoice pass; the LLM uses both to fix English terms and homophones.
+- **Two-ASR cross-reference** — a primary ASR plus an optional VibeVoice pass; the LLM uses both to fix English terms and homophones. Run them **sequentially**: both extract audio to the same `<video>.wav`, and Step 1's cleanup deletes it, so running them at once can feed the primary ASR a truncated wav or leave VibeVoice with a missing file. Independent wav filenames are the real fix and are not implemented yet.
 - **Two-layer slide extraction** — a `.pptx` input is read on both layers: the OOXML text *and* the pixels of its embedded images. Chart screenshots routinely carry tickers and indicator names that appear nowhere in the XML, so text-only extraction misses them silently. OCR failure degrades to a warning — term extraction never hard-fails on it.
 - **Structural quality gate** — the merge step rejects over-merged segments and auto-retries.
 - **Fail-loud ASR** — if the ASR step yields an empty/0-byte SRT (a known `mlx_whisper` `KeyError: 'words'` writer bug that discards output despite a successful transcription), the pipeline reconstructs the SRT from the captured verbose stdout, or hard-fails — it never silently reports success on an empty subtitle.
@@ -103,8 +104,9 @@ Native MLX ASR does not run on Windows. The Python orchestration/correction pipe
 YouTube 連結 或 本地影片／音檔
   ↓ Step 0   (僅 YouTube)   yt-dlp 下載
   ↓ Step 0.5 (選用)         投影片／畫面 caption 擷取，提供視覺語境
-  ├─ Step 1                 ASR（Breeze／Whisper）          ┐ 平行
-  └─ Step 1'                VibeVoice ASR（選用）           ┘ 交叉參考
+  ↓ Step 1                  ASR（Breeze／Whisper）
+  ↓ Step 1'                 VibeVoice ASR（選用）— 跑在 Step 1 之後，不可與之並行
+                            （兩者抽到同一個 <影片>.wav，見下方說明）
   ↓ Step 1.5                ASR 幻覺偵測 + 自動修復
   ↓ Step 2a                 機械性預處理
   ↓ Step 2b                 分段 LLM 校正（Claude subagent，或本地 Ollama）
@@ -115,7 +117,7 @@ YouTube 連結 或 本地影片／音檔
 ```
 
 設計重點：
-- **雙路 ASR 交叉參考** — 主 ASR 加上選用的 VibeVoice；LLM 用兩者一起修正英文術語與同音字。
+- **雙路 ASR 交叉參考** — 主 ASR 加上選用的 VibeVoice；LLM 用兩者一起修正英文術語與同音字。兩者必須**序列執行**：它們抽到同一個 `<影片>.wav`，而 Step 1 的清理會刪掉它，同時跑可能讓主 ASR 讀到截斷的 wav、或讓 VibeVoice 找不到檔案。根治是各自獨立的 wav 檔名，尚未實作。
 - **投影片雙層抽取** — `.pptx` 輸入會同時讀兩層：OOXML 文字層**與**內嵌圖片的像素層。K 線截圖裡常有 XML 完全沒有的 ticker 與指標名，只抽文字會靜默漏掉。OCR 失敗降級為 warning——不會讓術語抽取整個掛掉。
 - **結構性品質 gate** — 合併步驟會擋下過度合併的段落並自動重派。
 - **ASR 失敗會出聲** — 若 ASR 步驟產出空／0-byte SRT（mlx_whisper 已知的 `KeyError: 'words'` 寫檔 bug：辨識其實成功卻丟棄輸出），pipeline 會從捕獲的 verbose stdout 重建 SRT，否則直接 hard-fail——絕不對空字幕靜默回報成功。
