@@ -509,6 +509,24 @@ def write_terms_file(terms: dict, output_path: str):
         f.write("\n".join(lines))
 
 
+def fullwidth_latin_to_half(s: str) -> str:
+    """全形英文字母與數字轉半形，保留全形標點（中文字幕與術語表要全形標點）。
+
+    Austin 的投影片在 PowerPoint CJK 排版下英文時全形時半形（同一份裡
+    「震盪指標（ＫＤ/ＲＳＩ…）」與半形 MA/MACD 並存）。抽進術語表後
+    校正 subagent 會照抄，產出全形 ＫＤ。使用者要求一律半形，在抽取端
+    正規化（2026-08-14）。
+    """
+    out = []
+    for c in s:
+        o = ord(c)
+        if 0xFF21 <= o <= 0xFF3A or 0xFF41 <= o <= 0xFF5A or 0xFF10 <= o <= 0xFF19:
+            out.append(chr(o - 0xFEE0))
+        else:
+            out.append(c)
+    return "".join(out)
+
+
 def extract_pptx_text(pptx_path: str) -> tuple[list[str], list[str], int]:
     """Extract text lines from PowerPoint slides, tables, and speaker notes."""
     try:
@@ -523,7 +541,7 @@ def extract_pptx_text(pptx_path: str) -> tuple[list[str], list[str], int]:
     slide_number = 0
 
     def add_line(text: str):
-        text = text.strip()
+        text = fullwidth_latin_to_half(text).strip()
         if text:
             lines.append(text)
 
