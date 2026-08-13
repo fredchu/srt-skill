@@ -672,10 +672,14 @@ done
 
 校正 subagent 只標記不查證（它們刻意離線）。本步在 `_2c_final.srt` 產出後、Step 4 壓字幕**之前**執行——聚合 sidecar、查證、修 final srt：
 
-1. **聚合＋新鮮度檢查（deterministic）**：收集 `_seg_*_uncertain.json`；逐檔重算對應 `_seg_N_corrected.srt` 的 SHA-256 與 envelope 的 `corrected_sha256` 比對——**corrected 檔不存在、缺 hash 欄位、或 hash 不符 → 丟棄該 sidecar 並警示**（stale 殘留）。通過者以 normalized term 去重聚合。零 sidecar → 本步結束（no-op）。
+1. **聚合＋新鮮度檢查（deterministic）**：
+   **先確認所有段落都已完成**——比對 `_seg_*_corrected.srt` 的數量與 `srt_prepare_segments.py` 回報的段數是否相等，不等就等到相等再聚合。校正 subagent 是先寫 corrected.srt 再寫 sidecar，**在還有段落未完成時聚合會靜默漏掉後到的 sidecar**（2026-08-13 技術分析-8月-02 實例：聚合當下只看到 4 個，seg 8 的第 5 個稍後才落檔，該項未經查證就進了成品）。
+   確認完整後收集 `_seg_*_uncertain.json`；逐檔重算對應 `_seg_N_corrected.srt` 的 SHA-256 與 envelope 的 `corrected_sha256` 比對——**corrected 檔不存在、缺 hash 欄位、或 hash 不符 → 丟棄該 sidecar 並警示**（stale 殘留）。通過者以 normalized term 去重聚合。零 sidecar → 本步結束（no-op）。
+   **驗證結果必須落盤成 `_sidecar_audit.json`**（每個 sidecar 一筆：檔名、pass/stale、當下重算的 hash、聚合時間）。理由：sidecar 本身刻意保留供事後稽核，但它的 hash 錨點 `_seg_N_corrected.srt` 會被 Step 5 清理，**清理後就永遠無法再驗證這些 sidecar 是否新鮮**（2026-08-13 實測：補驗 seg 8 時 corrected 檔已刪，算不出 hash）。把「當初驗過、結果為何」寫下來，稽核材料才是完整的。`_sidecar_audit.json` 與 sidecar 同樣不清理。
    **「聲稱保留」逐條 grep 確認**：sidecar 與校正/複查 subagent 回報中每一條「存疑但保留原樣」的條目，都要拿**原文**（term＋context）grep final SRT 確認真的還在——grep 不到＝subagent 回報與檔案不符（實際已改），比對 `_seg_N_corrected.srt` 找出實際套用的版本，語意反轉或單路證據的改動按契約回退為 ASR 原文並列報告（2026-07-25 技術分析-7月-05 實例：段 9 回報「保留」實已套 VV 反義版「我不能很黏」，靠此 grep 抓到）。
 2. **四層查證**（同 speech-to-prose Step 3.5，證據不足寧可不改）：
-   - **L0 全文內部交叉比對（最優先）**：`python3 "$SP_DIR/scripts/noun_xref.py" --term "<詞>" ... <_2c_final.srt> <ASR 原始 srt> <_vibevoice.srt> --json`（`SP_DIR=~/.claude/skills/speech-to-prose`），LLM 判讀候選段落語境是否指向同一實體（實例：KISS 在他處被聽對成 keys）。**xref 必須對「錯詞＋每個 guess 候選」都跑**，不能只搜錯詞：候選在全片他處以雙路一致形式出現即為有效收斂證據（2026-07-25 技術分析-7月-04 實例：「棄牌」xref 無果判 L3，但候選「技法」在同片 00:19:44 已正確出現；「市值關卡」有兩處「市值」雙路一致佐證——證據都在，只因未搜候選側而漏接，最後靠用戶裁決）
+   - **L0 全文內部交叉比對（最優先）**：`python3 "$SP_DIR/scripts/noun_xref.py" --term "<詞>" ... <_2c_final.srt> <ASR 原始 srt> <_vibevoice.srt> --json`（`SP_DIR=~/.claude/skills/speech-to-prose`），LLM 判讀候選段落語境是否指向同一實體（實例：KISS 在他處被聽對成 keys）。**雙路 ASR 一致不等於正確**：兩路都寫同一個詞時，只有在「正解與錯字不同音」時才是強證據；**候選高度同音時兩個模型會一起滑向同一個錯字，一致性失去鑑別力**，必須找第三方來源（投影片／畫面 OCR／外部查證）。2026-08-13 同一支影片的兩個對照：「週期架構 vs 週期結構」架 jià／結 jié 不同音，雙路各自一致即可採信；而「動畫 dònghuà vs 鈍化 dùnhuà」上百處、「三足 zú vs 三竹 zhú」兩處，都是雙路一致但雙路皆錯，前者靠投影片術語表判回、後者靠中性 WebSearch 收斂（三竹資訊為台股券商看盤系統主要資訊商）。**「三足系統」那兩處沒有任何 subagent 標記過**——字面通順、無內部矛盾的錯誤不會進 sidecar，只能靠主 session 讀 VV 全文時撞見，所以 Step 2d 不能只處理 sidecar 列出的項目。
+   - **xref 必須對「錯詞＋每個 guess 候選」都跑**，不能只搜錯詞：候選在全片他處以雙路一致形式出現即為有效收斂證據（2026-07-25 技術分析-7月-04 實例：「棄牌」xref 無果判 L3，但候選「技法」在同片 00:19:44 已正確出現；「市值關卡」有兩處「市值」雙路一致佐證——證據都在，只因未搜候選側而漏接，最後靠用戶裁決）
    - **L1 本地**：講者 terms 檔、`_slide_terms.txt`（畫面 OCR 是 ground truth）、wiki
    - **L2 中性 WebSearch**：query 只准用上下文關鍵詞、**禁止放入猜測答案**（防確認偏誤）；得候選清單後才驗音近
    - **L3 未收斂**：字幕原樣不改、記入報告（**與 speech-to-prose 的〔註〕標記刻意不同**：字幕是螢幕顯示格式、校正契約嚴禁 commentary 入字幕，未收斂項的候選與理由一律進報告讓用戶決定）
@@ -757,6 +761,7 @@ rm -f "${VIDEO_DIR}/<影片檔名同名>.wav"
 - 字幕影片（`_sub.mkv`，如有）
 - 投影片術語（`_slide_terms.txt`，如有）
 - 名詞查證 sidecar（`_seg_*_uncertain.json`，如有）— **刻意不清理**：它是 Step 2d 未收斂項的唯一稽核材料（原詞／時間／上下文／候選），刪掉就無法回溯「當初為什麼判 L3」。它長得像暫存檔，但不是 — 不要順手加回上面的清理清單。
+- 名詞查證稽核紀錄（`_sidecar_audit.json`，如有）— **同樣刻意不清理**：sidecar 的 hash 錨點（`_seg_*_corrected.srt`）在本步被刪除後，這是唯一還能證明「這些 sidecar 當初通過新鮮度檢查」的憑證。
 
 ## 完成後回報
 
