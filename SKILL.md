@@ -154,6 +154,14 @@ yt-dlp -f "bestvideo[height<=1080]+bestaudio/best" \
 cp "<原始路徑>" "${VIDEO_DIR}/"
 ```
 
+> **影片還在 YouTube 端轉檔時（`We're processing this video. Check back later.`）一律架 watchdog 輪詢，不要停下來問用戶**。
+> 先拿一支已知可下載的影片跑同一條指令做對照，確認是影片端而非 yt-dlp 端的問題；
+> 然後用 Bash `run_in_background` 的 `until` 迴圈（等單一條件成立＝單次通知，不要用 Monitor）
+> 每 2 分鐘探一次 metadata、上限約 60 分鐘。判定條件驗**輸出內容含影片 ID**，不要只驗 exit code；
+> 成功與耗盡都要有明確訊號，沉默不得代表任何狀態。**每輪狀態落盤**——CC 的半小時 reap 波次
+> （約 :06/:36）會 SIGTERM 背景進程樹，被砍時靠狀態檔判斷跑到哪、直接續開。
+> 抓到後自動接完整 pipeline，不要再問一次。同時告知用戶：有原始檔的話給路徑可跳過下載。
+
 說明：
 - 直接下載到 `${VIDEO_DIR}`，不使用暫存目錄（避免 cwd 被刪除導致背景任務崩潰）
 - 檔名格式：`影片標題 [影片ID].mkv`
