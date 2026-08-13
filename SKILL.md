@@ -66,7 +66,7 @@ ${SUBTITLE_DIR}/
 
 | 組合 | 可否並行 |
 |------|---------|
-| Breeze ASR + VibeVoice | ✅ 可（skill 標準平行組合） |
+| Breeze ASR + VibeVoice | ❌ 不可 — **兩者搶同一個 `<影片檔名>.wav`**（`subtitle.sh` 清理會刪掉它，`vibevoice_asr.py` 抽取同一路徑）。已出事兩次（2026-07-17 技術分析-6月-03：Breeze 只轉出 4.6/51.8 分鐘；2026-08-01 淡定 2026）。**先跑完 Breeze 再啟動 VV**；根治（各自獨立 wav 檔名）未實作。記憶體層面兩者確實不會 OOM（wiki `subtitle-pipeline` 第 313 行），但那不涵蓋這個搶檔 race |
 | 兩個 VibeVoice instance | ❌ 不可（vv_longaudio.py 內建 flock 鎖強制序列） |
 | 兩部影片同時跑 ASR（2×Breeze+2×VV） | ❌ 不可 — 多影片時 ASR 階段逐部排隊，前一部進入 Step 2 後下一部才開始 ASR |
 | RapidOCR（Step 0.5，預設）+ 任一 ASR | ✅ 可（RapidOCR 純 CPU，不搶 MLX GPU） |
@@ -199,9 +199,11 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/srt_extract_slides.py" \
 - `_slide_terms.txt` 加在術語表後面（全局，與舊行為相同）
 - `_slide_captions.json` 按時間戳分配給對應的 segment，寫入 `_caption_ref_<N>.txt`
 
-### Step 1': VibeVoice 平行 ASR（與 Step 1 同時跑）
+### Step 1': VibeVoice 輔助 ASR（**序列跑在 Step 1 之後**）
 
-VibeVoice 做輔助 ASR，產出供 Step 2b 交叉參考。與 Step 1 用兩個平行 Bash 呼叫同時執行。
+VibeVoice 做輔助 ASR，產出供 Step 2b 交叉參考。
+
+> ⚠️ **不要與 Step 1 並行**：兩者都把音檔抽到 VIDEO_DIR 內同一個 `<影片檔名>.wav`，`subtitle.sh` 清理時會刪掉它，`vibevoice_asr.py` 抽取的是同一路徑。並行時 Breeze 可能讀到被覆寫中的截斷 wav（2026-07-17：只轉出 4.6/51.8 分鐘，條數檢查放行、靠尾端時間戳才抓到），或 VV 因檔案被刪 FileNotFoundError。**等 Breeze 完成再啟動 VV**。根治是各自獨立 wav 檔名，未實作。
 
 **短音檔（≤ 55 分鐘）— 直接跑：**
 
@@ -323,8 +325,16 @@ python3 "${CORRECT_DIR}/srt_preprocess.py" "<ASR 產出的 SRT>" "<輸出路徑>
        --workdir "${VIDEO_DIR}" \
        --prompt-template "${CORRECT_DIR}/srt_correct_prompt.txt" \
        --terms "${TERMS}" \
+       --slide-terms "<pptx 抽出的 _slide_terms.txt，沒有就省略>" \
+       --vv-json "<VV JSON 路徑，沒跑 VV 才省略>" \
        --captions-json "<caption JSON 路徑，沒有就省略此參數>"
    ```
+
+   > ⚠️ **`--vv-json` 漏掉會靜默失去 VV 交叉參考**（2026-08-01 記錄、2026-08-13 確認 SKILL 範例仍漏）。
+   > 症狀只有 summary 裡的 `vv_segments: 0`：不報錯、subagent 全讀到 `NO_VV_REFERENCE` 照常跑完、成品看起來正常。
+   > **VV JSON 檔名是從「輸入檔 stem」衍生，不是 `--output` 指定的名字** —— 影片叫 `X [id].mkv` 時
+   > JSON 是 `X [id]_vibevoice.json`，而 SRT 可能是 `X_vibevoice.srt`，兩者不同名，別憑 SRT 檔名推 JSON 路徑。
+   > 跑完務必檢查 summary 的 `vv_segments` 與 `captions` 都不是 0。
 
    stdout 會印 JSON summary：`{"strategy": "dynamic", "tokenizer": "tiktoken", "total_blocks": N, "segments": [...], "segment_tokens": [...], "vv_segments": N, "captions": N}`。
 
