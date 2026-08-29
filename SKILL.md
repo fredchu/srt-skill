@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.6.0
+version: 1.6.1
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -21,8 +21,8 @@ YouTube 連結 或 本地影片/音檔
   ↓ Step 0 (if YouTube): yt-dlp 下載影片
   ↓ Step 0.5 (if 投影片文字): 抽取本集術語補充表
 本地影片檔
-  ├─ Step 1:  subtitle.sh (Breeze ASR)        ─┐ 平行
-  └─ Step 1': vibevoice_asr.py (VV ASR)       ─┘
+  ↓ Step 1:  subtitle.sh (Breeze ASR)          ← 先跑完這個
+  ↓ Step 1': vibevoice_asr.py (VV ASR)         ← 再跑；不可與 Step 1 並行（搶同一個 wav）
 原始 SRT (.srt) + VV JSON
   ↓ Step 1.5: srt_hallucination_fix.py (幻覺偵測+自動修復)
   ↓ Step 2a: srt_preprocess.py → _2a_preprocessed.srt
@@ -84,7 +84,7 @@ ${SUBTITLE_DIR}/
 - VibeVoice 是選用參考。進程消失但沒有有效 VV SRT/JSON 時，擷取 log/exit code 記 warning，跳過 VV 交叉參考繼續；絕不無限等。
 - OCR/caption 依 slide-ref 是否為本次必要輸入比照處理；選用 caption 失敗時記 warning 並略過 caption ref。
 
-並行邊界按引擎判斷：Breeze + VibeVoice 可並行；RapidOCR（純 CPU）可與 ASR 並行；VLM caption（`--engine ollama/mlx` 或顯式 VLM model）必須序列在 GPU ASR 之後，不能籠統宣稱 Step 0.5 可與 ASR 並行。
+並行邊界按引擎判斷：**Breeze 與 VibeVoice 不可並行**——兩者搶同一個 `<影片檔名>.wav`，見上方互斥表（記憶體層面確實不會 OOM，但那不涵蓋搶檔 race）；RapidOCR（純 CPU）可與 ASR 並行；VLM caption（`--engine ollama/mlx` 或顯式 VLM model）必須序列在 GPU ASR 之後，不能籠統宣稱 Step 0.5 可與 ASR 並行。
 
 `ScheduleWakeup` 是 Pro CC（主 session）專屬，用於 quota-wait 或顯式 resume。Codex / 本地 worker 不能呼叫；背景等待只能留下可續產物或 retry marker，然後用手動/status 回查恢復。
 
