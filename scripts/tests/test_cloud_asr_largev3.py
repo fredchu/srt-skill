@@ -86,6 +86,79 @@ def _run_cloud_asr(args: list[str], *, env: dict[str, str] | None = None) -> sub
     )
 
 
+def _with_terms_file(args: list[str], tmp: Path) -> list[str]:
+    if "__TERMS__" not in args:
+        return list(args)
+    terms = tmp / "terms.txt"
+    terms.write_text("Alpha\nBravo\n", encoding="utf-8")
+    return [str(terms) if token == "__TERMS__" else token for token in args]
+
+
+def _pod_attempts_text(out_dir: Path) -> str:
+    path = out_dir / "env" / "pod_attempts.txt"
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def _assert_single_create_and_terminate(out_dir: Path) -> None:
+    attempts = _pod_attempts_text(out_dir)
+    assert attempts.count("action=create result=success") == 1, attempts
+    assert attempts.count("action=terminate result=success") == 1, attempts
+
+
+@pytest.mark.parametrize(
+    "mode_args",
+    [
+        ["--breeze", "--initial-prompt", "x"],
+        ["--vv", "--initial-prompt", "x"],
+        ["--largev3", "--terms", "__TERMS__"],
+        ["--breeze", "--terms", "__TERMS__"],
+        ["--largev3", "--json"],
+    ],
+    ids=[
+        "breeze+initial-prompt",
+        "vv+initial-prompt",
+        "largev3+terms",
+        "breeze+terms",
+        "largev3+json",
+    ],
+)
+def test_paid_gate_invalid_combinations_fail_pre_create(tmp_path: Path, mode_args: list[str]) -> None:
+    wav = _make_wav(tmp_path / "in.wav")
+    out = tmp_path / "out"
+    env = _mock_env(tmp_path)
+
+    args = [str(wav), str(out), "demo", "zh", *_with_terms_file(mode_args, tmp_path)]
+    proc = _run_cloud_asr(args, env=env)
+
+    assert proc.returncode != 0
+    assert "invalid argument" in proc.stderr
+    assert "creating RunPod pod name=" not in proc.stderr
+    assert "action=create" not in _pod_attempts_text(out)
+
+
+@pytest.mark.parametrize(
+    "mode_args",
+    [
+        ["--breeze"],
+        ["--vv", "--terms", "__TERMS__", "--json"],
+        ["--largev3", "--initial-prompt", "保留關鍵術語"],
+    ],
+    ids=["breeze-legal", "vv-legal-with-terms-json", "largev3-legal-with-prompt"],
+)
+def test_paid_gate_legal_controls_create_and_terminate_once(tmp_path: Path, mode_args: list[str]) -> None:
+    wav = _make_wav(tmp_path / "in.wav")
+    out = tmp_path / "out"
+    env = _mock_env(tmp_path)
+
+    args = [str(wav), str(out), "demo", "zh", *_with_terms_file(mode_args, tmp_path)]
+    proc = _run_cloud_asr(args, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    _assert_single_create_and_terminate(out)
+
+
 def test_mode_flag_four_states(tmp_path: Path) -> None:
     wav = _make_wav(tmp_path / "in.wav")
     out = tmp_path / "out"

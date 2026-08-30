@@ -1972,11 +1972,11 @@ case "${#MODEL_FLAGS[@]}" in
 esac
 
 if [[ "$ASR_MODE" != "vv" && ( -n "$VV_TERMS_FILE" || "$VV_TERMS_MAX" != "50" || "$VV_JSON_ENABLED" == true ) ]]; then
-    die "VV options are only valid with --vv"
+    die "invalid argument: VV options are only valid with --vv"
 fi
 
 if [[ "$ASR_MODE" != "largev3" && "$INITIAL_PROMPT_CLI_SEEN" == true ]]; then
-    die "--initial-prompt is only valid with --largev3"
+    die "invalid argument: --initial-prompt is only valid with --largev3"
 fi
 if [[ "$ASR_MODE" == "largev3" && "$INITIAL_PROMPT_CLI_SEEN" == true && -n "$INITIAL_PROMPT_CLI_VALUE" ]]; then
     ASR_INITIAL_PROMPT="$INITIAL_PROMPT_CLI_VALUE"

@@ -17,6 +17,8 @@ srt_hallucination_fix.py — ASR 幻覺偵測 + 自動修復
 import re
 import sys
 import os
+import shutil
+import tempfile
 import subprocess
 from collections import Counter
 
@@ -183,10 +185,28 @@ def run_asr(wav_path, output_dir, use_breeze=True):
         print(f"  🛑 已達 ASR 呼叫總量上限 {max_calls} 次（SRT_ASR_MAX_CALLS），停止。"
               f"雲端模式下每次呼叫都是一台新機器。", file=sys.stderr)
         return None
+
+    asr_engine = os.environ.get('SRT_ASR_ENGINE')
+    asr_wav_path = wav_path
+    asr_output_dir = output_dir
+    if asr_engine == 'runpod':
+        runs_root = os.path.join(output_dir, '.cloud_asr_runs')
+        try:
+            os.makedirs(runs_root, exist_ok=True)
+            asr_output_dir = tempfile.mkdtemp(prefix=f'call-{_ASR_CALLS:03d}.', dir=runs_root)
+            asr_wav_path = os.path.join(asr_output_dir, os.path.basename(wav_path))
+            shutil.copy2(wav_path, asr_wav_path)
+        except OSError as exc:
+            print(f"  ❌ 建立 RunPod call 目錄失敗: {exc}", file=sys.stderr)
+            _ASR_HARD_STOP = True
+            return None
+        print(f"  ☁️ RunPod call dir: {asr_output_dir}", file=sys.stderr)
+        print(f"  ☁️ RunPod evidence dir: {os.path.join(asr_output_dir, 'env')}", file=sys.stderr)
+
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     subtitle_sh = os.path.join(script_dir, 'subtitle.sh')
 
-    cmd = [subtitle_sh, wav_path]
+    cmd = [subtitle_sh, asr_wav_path]
     if use_breeze:
         cmd.append('--breeze')
 
@@ -217,6 +237,10 @@ def run_asr(wav_path, output_dir, use_breeze=True):
                   "雲端機器可能被遺棄，請跑 scripts/runpod_reap.sh 確認", file=sys.stderr)
             proc.kill()
             stdout, stderr = proc.communicate()
+        if asr_engine == 'runpod':
+            print("  🛑 雲端模式：ASR timeout 後停止整支，避免下一個 anomaly 再開機器。",
+                  file=sys.stderr)
+            _ASR_HARD_STOP = True
         return None
 
     # 把子程序的輸出落檔。Popen 捕捉之後如果只留在記憶體，
@@ -224,9 +248,9 @@ def run_asr(wav_path, output_dir, use_breeze=True):
     # （2026-08-30 pi 指出：成功時的 stdout 被丟棄，驗收要的
     #  「引擎：runpod」與「normalizing」字串不會出現在任何檔案裡。）
     try:
-        log_path = os.path.join(output_dir, '_asr_call.log')
+        log_path = os.path.join(asr_output_dir, '_asr_call.log')
         with open(log_path, 'a', encoding='utf-8') as fh:
-            fh.write(f"\n===== ASR call #{_ASR_CALLS} : {os.path.basename(wav_path)} =====\n")
+            fh.write(f"\n===== ASR call #{_ASR_CALLS} : {os.path.basename(asr_wav_path)} =====\n")
             fh.write(stdout or '')
             fh.write(stderr or '')
     except OSError:
@@ -254,14 +278,14 @@ def run_asr(wav_path, output_dir, use_breeze=True):
         return None
 
     # 找產出的 SRT
-    basename = os.path.splitext(os.path.basename(wav_path))[0]
-    srt_path = os.path.join(output_dir, f'{basename}.srt')
+    basename = os.path.splitext(os.path.basename(asr_wav_path))[0]
+    srt_path = os.path.join(asr_output_dir, f'{basename}.srt')
     if os.path.exists(srt_path):
         return srt_path
     # fallback: 找最近的 .srt
-    for f in sorted(os.listdir(output_dir), key=lambda x: os.path.getmtime(os.path.join(output_dir, x)), reverse=True):
+    for f in sorted(os.listdir(asr_output_dir), key=lambda x: os.path.getmtime(os.path.join(asr_output_dir, x)), reverse=True):
         if f.endswith('.srt') and basename in f:
-            return os.path.join(output_dir, f)
+            return os.path.join(asr_output_dir, f)
     return None
 
 
