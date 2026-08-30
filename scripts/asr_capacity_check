@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""判斷這台機器跑不跑得動本地 ASR，輸出機器可讀的裁決。
+
+設計原則：**不猜門檻。** 三層都不是猜——
+  地板：mlx 裝不裝得起來、Metal 工作集上限多少（查得到，不是估的）
+  探針：灰色地帶才真的載一次模型量（未實作，見 TODO）
+  快取：一台量一次，寫 ~/.config/srt/capacity.conf
+
+為什麼要分模型判斷：同一台機器對兩個模型的答案可能不同。
+8GB 的 Mac 上 Breeze（2.9 GB）跑得動、VibeVoice（4-bit 5.32 GiB）貼著上限——
+而 Metal 超過工作集是**直接報 buffer 錯**不是變慢，所以那是結構性的不可能。
+
+輸出（一行一個 key=value）：
+  mlx=yes|no
+  ram_gb=<float>
+  metal_working_set_gb=<float|unknown>
+  breeze_local=ok|risky|impossible
+  vv_local=ok|risky|impossible
+  reason=<一句話>
+"""
+import json, os, pathlib, shutil, subprocess, sys
+
+# 模型權重實測值（本機 ~/.cache/huggingface 量的，不是估的）
+BREEZE_GB = 2.9
+VV_GB = 5.32
+# 推論期增量。雲端實測 VV 生成階段 4.68 GiB；Breeze 沒有實測，保守給 1.0
+VV_INFER_GB = 4.68
+BREEZE_INFER_GB = 1.0
+
+CACHE = pathlib.Path.home() / ".config/srt/capacity.conf"
+
+
+def ram_gb() -> float:
+    try:
+        out = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=10)
+        return int(out.stdout.strip()) / 1024**3
+    except Exception:
+        try:  # Linux
+            for line in pathlib.Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / 1024**2
+        except Exception:
+            pass
+    return 0.0
+
+
+def has_mlx() -> bool:
+    return shutil.which("mlx_whisper") is not None
+
+
+def metal_working_set_gb():
+    """Metal 的工作集上限。超過它 MLX 是直接報 buffer 錯，不是變慢。"""
+    try:
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import mlx.core as mx; print(mx.metal.device_info()['max_recommended_working_set_size'])"],
+            capture_output=True, text=True, timeout=30)
+        if out.returncode == 0 and out.stdout.strip().isdigit():
+            return int(out.stdout.strip()) / 1024**3
+    except Exception:
+        pass
+    return None
+
+
+def verdict(need_gb: float, budget_gb: float):
+    """budget 是可用預算（工作集上限，取不到就用 RAM 扣掉 OS）。"""
+    if budget_gb <= 0:
+        return "impossible", "取不到可用記憶體上限"
+    if need_gb > budget_gb:
+        return "impossible", f"需要 {need_gb:.2f} GB 超過上限 {budget_gb:.2f} GB"
+    margin = budget_gb - need_gb
+    if margin < 1.0:
+        return "risky", f"需要 {need_gb:.2f} GB、上限 {budget_gb:.2f} GB，餘裕僅 {margin:.2f} GB"
+    return "ok", f"需要 {need_gb:.2f} GB、上限 {budget_gb:.2f} GB，餘裕 {margin:.2f} GB"
+
+
+def main():
+    if "--no-cache" not in sys.argv and CACHE.is_file():
+        cached = CACHE.read_text(encoding="utf-8")
+        if f"host={os.uname().nodename}" in cached:
+            print(cached.rstrip())
+            return
+
+    mlx = has_mlx()
+    ram = ram_gb()
+    ws = metal_working_set_gb()
+    # 取不到工作集上限時，用 RAM 扣掉 macOS 常駐（保守 2.5 GB）當預算
+    budget = ws if ws else max(0.0, ram - 2.5)
+
+    if not mlx:
+        b_v, b_r = "impossible", "mlx_whisper 未安裝"
+        v_v, v_r = "impossible", "mlx_whisper 未安裝"
+    else:
+        b_v, b_r = verdict(BREEZE_GB + BREEZE_INFER_GB, budget)
+        # 顯式地板：8 GB 機器的 Metal 工作集上限約 5.3-5.5 GB，
+        # VV 光權重就 5.32 GiB 貼著線。超過工作集是**直接報 buffer 錯**不是變慢，
+        # 所以這是結構性的不可能，不是「餘裕不足」。
+        # 不依賴上面的算式——取不到工作集上限時算式會走 RAM 推估，那條路較不可靠。
+        if ram <= 8.5:
+            v_v, v_r = "impossible", f"RAM {ram:.1f} GB：Metal 工作集上限約 5.3-5.5 GB，VV 權重 5.32 GiB 貼線，超過是硬錯不是變慢"
+        else:
+            v_v, v_r = verdict(VV_GB + VV_INFER_GB, budget)
+            # 8 < RAM < 16 的灰色地帶：算式說 ok 也要降成 risky，等探針給實數
+            if v_v == "ok" and ram < 16:
+                v_v, v_r = "risky", f"RAM {ram:.1f} GB 落在灰色地帶（8-16 GB），需實機探針確認：{v_r}"
+
+    lines = [
+        f"host={os.uname().nodename}",
+        f"mlx={'yes' if mlx else 'no'}",
+        f"ram_gb={ram:.1f}",
+        f"metal_working_set_gb={ws:.2f}" if ws else "metal_working_set_gb=unknown",
+        f"breeze_local={b_v}",
+        f"vv_local={v_v}",
+        f"reason=Breeze: {b_r}｜VibeVoice: {v_r}",
+    ]
+    out = "\n".join(lines)
+    print(out)
+    try:
+        CACHE.parent.mkdir(parents=True, exist_ok=True)
+        CACHE.write_text(out + "\n", encoding="utf-8")
+    except Exception:
+        pass  # 寫不了快取不影響判斷
+
+
+if __name__ == "__main__":
+    main()

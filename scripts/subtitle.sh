@@ -339,7 +339,11 @@ if [ "$MLX_OUTPUT" != "$SRT_CN" ]; then
 fi
 
 # 半形逗號 → 全形（跳過時間戳記行）
-sed -i '' '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9],/! s/,/，/g' "$SRT_CN"
+# ⚠️ 不要用 `sed -i ''`——那是 BSD/macOS 語法，GNU sed 會把 '' 當成檔名，
+# 回 "can't read : No such file or directory" 並 exit 2，Step 1 直接死。
+# `-i.bak` 兩邊都吃，備份檔隨後刪掉。
+sed -i.bak '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9],/! s/,/，/g' "$SRT_CN"
+rm -f "${SRT_CN}.bak"
 
 STEP_ELAPSED=$((SECONDS - STEP_START))
 LINES=$(grep -cE '^[0-9]+$' "$SRT_CN" 2>/dev/null || echo "?")
