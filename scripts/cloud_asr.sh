@@ -10,13 +10,30 @@ RUNPOD_IMAGE="runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
 RUNPOD_GPU_TYPE_ID="NVIDIA GeForce RTX 4090"
 RUNPOD_CONTAINER_DISK_GB=60
 RUNPOD_ESTIMATED_RATE_PER_HR="${RUNPOD_ESTIMATED_RATE_PER_HR:-0.751}"
+# 預算上限。⚠️ 這是【步驟之間】才檢查的軟上限，不是硬上限——
+# check_cost_cap 只在各步驟的交界呼叫，單一步驟跑再久也不會被它中斷。
+# 所以實際花費最多會超出上限「一個步驟」的量。
+# SSH_COMMAND_TIMEOUT 放寬到 1800 秒之後，最壞情況是超出約 0.37 美元
+# （1800 秒 × 0.751/小時）。要真正封頂請同時調低 SSH_COMMAND_TIMEOUT_SECONDS。
 COST_CAP_USD="${COST_CAP_USD:-0.5}"
 SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY:-$HOME/.ssh/id_ed25519}"
 SSH_PUBLIC_KEY_PATH="${SSH_PUBLIC_KEY_PATH:-$HOME/.ssh/id_ed25519.pub}"
 SSH_PROBE_TIMEOUT_SECONDS="${SSH_PROBE_TIMEOUT_SECONDS:-25}"
-SSH_COMMAND_TIMEOUT_SECONDS="${SSH_COMMAND_TIMEOUT_SECONDS:-900}"
+# 這兩個上限放寬過（2026-08-30），因為租到的機器彼此差很多：
+#
+# SSH_COMMAND_TIMEOUT 900 → 1800：
+#   同一段遠端安裝指令，快的機器 19 秒、慢的機器 7 分 30 秒（實測，差 20 倍），
+#   差別在那台機器連到套件庫的網速。900 秒對慢機器加上長音檔上傳會貼線，
+#   一旦誤判逾時就是白花一次開機成本、還要重開一台。
+#
+# SSH_READY_TIMEOUT 180 → 420：
+#   RunPod 的直連端口大約一半機率生不出來，這是已知的。但生得出來的那些，
+#   實測有等到 3.7 分鐘才好的（2026-08-29 第二台）。180 秒會把它誤判成
+#   壞掉的機器砍掉重開，等於白付一次冷啟動。
+#   （超過上限仍然是換一台，不是等更久——那條策略沒變。）
+SSH_COMMAND_TIMEOUT_SECONDS="${SSH_COMMAND_TIMEOUT_SECONDS:-1800}"
 POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-15}"
-SSH_READY_TIMEOUT_SECONDS="${SSH_READY_TIMEOUT_SECONDS:-180}"
+SSH_READY_TIMEOUT_SECONDS="${SSH_READY_TIMEOUT_SECONDS:-420}"
 REMOTE_MODEL_ID="SoybeanMilk/faster-whisper-Breeze-ASR-25"
 REMOTE_AUDIO_DIR="/root/in"
 REMOTE_OUTPUT_DIR="/root/out"
