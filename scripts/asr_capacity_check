@@ -206,6 +206,13 @@ def main():
         f"breeze_weights_gib={breeze_w:.2f} ({breeze_src})",
         f"vv_weights_gib={vv_w:.2f} ({vv_src})",
         f"breeze_local={b_v}",
+        # 逐模型的原因分開輸出。合在一起的 reason= 保留給人看，
+        # 但下游（subtitle.sh）需要單獨取 Breeze 那一半——
+        # 之前只有合併版，subtitle.sh 抓 breeze_reason= 抓不到，
+        # 於是印出預設字串「記憶體不足」，而真因是「mlx_whisper 未安裝」。
+        # 那會讓使用者去買記憶體而不是去裝套件。
+        f"breeze_reason={b_r}",
+        f"vv_reason={v_r}",
         f"vv_local={v_v}",
         f"reason=Breeze: {b_r}｜VibeVoice: {v_r}",
     ]
