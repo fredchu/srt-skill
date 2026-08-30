@@ -20,12 +20,54 @@
 """
 import json, os, pathlib, shutil, subprocess, sys
 
-# 模型權重實測值（本機 ~/.cache/huggingface 量的，不是估的）
-BREEZE_GB = 2.9
-VV_GB = 5.32
-# 推論期增量。雲端實測 VV 生成階段 4.68 GiB；Breeze 沒有實測，保守給 1.0
-VV_INFER_GB = 4.68
-BREEZE_INFER_GB = 1.0
+# 模型在 Hugging Face 上的名字。權重大小【不寫死】——去讀實際檔案。
+BREEZE_REPO = "eoleedi/Breeze-ASR-25-mlx"
+VV_REPO = "mlx-community/VibeVoice-ASR-4bit"
+
+# 只有在完全讀不到實際檔案時才用的退路值，單位 GiB。
+# ⚠️ 這些是退路不是真相。原本寫死 BREEZE_GB=2.9 是 `du -sh` 的十進位顯示，
+# 而實際 weights.safetensors 是 3,082,909,389 bytes = 2.87 GiB——
+# 兩個數字差 1%，但工作集上限只有 5.33 GiB 時這種誤差會改變判斷。
+# （Fable review-20 指出：不要用常數，去讀檔案大小。）
+BREEZE_FALLBACK_GIB = 2.87
+VV_FALLBACK_GIB = 5.32
+
+# 推論期的額外用量。雲端實測 VV 生成階段 4.68 GiB。
+# Breeze 沒有實測，保守給 1.0——想要真數字請用 --probe（見下）。
+VV_INFER_GIB = 4.68
+BREEZE_INFER_GIB = 1.0
+
+
+def weights_gib(repo: str, fallback: float) -> tuple:
+    """回 (大小 GiB, 來源說明)。
+
+    優先讀本機 HF 快取裡的實際檔案大小；沒下載過就問 HF API 要 bytes；
+    兩者都不行才用退路常數。回傳來源說明，讓報告看得出這個數字是量的還是猜的。
+    """
+    cache = pathlib.Path.home() / ".cache/huggingface/hub" / ("models--" + repo.replace("/", "--"))
+    if cache.is_dir():
+        total = 0
+        for f in cache.rglob("*"):
+            try:
+                if f.is_file() and not f.is_symlink():
+                    total += f.stat().st_size
+            except OSError:
+                pass
+        if total > 0:
+            return total / 1024**3, "本機快取實測"
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"https://huggingface.co/api/models/{repo}?blobs=true",
+            headers={"User-Agent": "srt-capacity-check/1.0"},
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=15).read())
+        total = sum(sib.get("size") or 0 for sib in data.get("siblings", []))
+        if total > 0:
+            return total / 1024**3, "Hugging Face API"
+    except Exception:
+        pass
+    return fallback, "退路常數（沒量到，可能不準）"
 
 CACHE = pathlib.Path.home() / ".config/srt/capacity.conf"
 
@@ -84,11 +126,39 @@ def verdict(need_gb: float, budget_gb: float):
     if budget_gb <= 0:
         return "impossible", "取不到可用記憶體上限"
     if need_gb > budget_gb:
-        return "impossible", f"需要 {need_gb:.2f} GB 超過上限 {budget_gb:.2f} GB"
+        return "impossible", f"需要 {need_gb:.2f} GiB 超過上限 {budget_gb:.2f} GiB"
     margin = budget_gb - need_gb
     if margin < 1.0:
-        return "risky", f"需要 {need_gb:.2f} GB、上限 {budget_gb:.2f} GB，餘裕僅 {margin:.2f} GB"
-    return "ok", f"需要 {need_gb:.2f} GB、上限 {budget_gb:.2f} GB，餘裕 {margin:.2f} GB"
+        return "risky", f"需要 {need_gb:.2f} GiB、上限 {budget_gb:.2f} GiB，餘裕僅 {margin:.2f} GiB"
+    return "ok", f"需要 {need_gb:.2f} GiB、上限 {budget_gb:.2f} GiB，餘裕 {margin:.2f} GiB"
+
+
+# 各機型實測的辨識速度（倍率＝影片長度 ÷ 辨識耗時，越大越快）。
+# 「跑得動」不等於「值得跑」——8 GB 的機器跑得動 Breeze，但比雲端慢 2.3 倍。
+# 這些是 2026-08-30 用同一段 60 秒音檔實測的：
+#   M1 Max 32GB   17 倍
+#   M1 基本款 8GB   3.5 倍（60 秒音檔跑 17 秒，模型已在本機）
+#   雲端 RTX 4090  40 倍（一支 109 分鐘影片 13.4 分鐘，含開機，約 US$0.17）
+SPEED_RATIO_BY_TIER = {"low": 3.5, "mid": 8.0, "high": 17.0}
+CLOUD_MINUTES_PER_HOUR_OF_VIDEO = 7.4   # 109 分鐘影片 13.4 分鐘換算
+CLOUD_USD_PER_HOUR_OF_VIDEO = 0.094     # 0.17 美元 ÷ 1.82 小時
+
+
+def speed_hint(ram_gb: float) -> str:
+    """回一句白話，講「本地跑得動，但要多久」。"""
+    if ram_gb <= 8.5:
+        tier = "low"
+    elif ram_gb < 24:
+        tier = "mid"
+    else:
+        tier = "high"
+    ratio = SPEED_RATIO_BY_TIER[tier]
+    if tier == "high":
+        return f"本地約 {ratio:.0f} 倍速，比雲端划算"
+    local_min = 60 / ratio
+    return (f"本地約 {ratio:.1f} 倍速（一小時的影片要跑 {local_min:.0f} 分鐘），"
+            f"雲端約 {CLOUD_MINUTES_PER_HOUR_OF_VIDEO:.0f} 分鐘、"
+            f"US${CLOUD_USD_PER_HOUR_OF_VIDEO:.2f}")
 
 
 def main():
@@ -104,19 +174,25 @@ def main():
     # 取不到工作集上限時，用 RAM 扣掉 macOS 常駐（保守 2.5 GB）當預算
     budget = ws if ws else max(0.0, ram - 2.5)
 
+    breeze_w, breeze_src = weights_gib(BREEZE_REPO, BREEZE_FALLBACK_GIB)
+    vv_w, vv_src = weights_gib(VV_REPO, VV_FALLBACK_GIB)
+
     if not mlx:
         b_v, b_r = "impossible", "mlx_whisper 未安裝"
         v_v, v_r = "impossible", "mlx_whisper 未安裝"
     else:
-        b_v, b_r = verdict(BREEZE_GB + BREEZE_INFER_GB, budget)
+        b_v, b_r = verdict(breeze_w + BREEZE_INFER_GIB, budget)
         # 顯式地板：8 GB 機器的 Metal 工作集上限約 5.3-5.5 GB，
         # VV 光權重就 5.32 GiB 貼著線。超過工作集是**直接報 buffer 錯**不是變慢，
         # 所以這是結構性的不可能，不是「餘裕不足」。
         # 不依賴上面的算式——取不到工作集上限時算式會走 RAM 推估，那條路較不可靠。
         if ram <= 8.5:
-            v_v, v_r = "impossible", f"RAM {ram:.1f} GB：Metal 工作集上限約 5.3-5.5 GB，VV 權重 5.32 GiB 貼線，超過是硬錯不是變慢"
+            v_v, v_r = "impossible", (
+                f"RAM {ram:.1f} GB：實測 8GB M1 的 Metal 工作集上限 5.33 GiB，"
+                f"VV 權重 {vv_w:.2f} GiB（{vv_src}）貼線，超過是硬錯不是變慢"
+            )
         else:
-            v_v, v_r = verdict(VV_GB + VV_INFER_GB, budget)
+            v_v, v_r = verdict(vv_w + VV_INFER_GIB, budget)
             # 8 < RAM < 16 的灰色地帶：算式說 ok 也要降成 risky，等探針給實數
             if v_v == "ok" and ram < 16:
                 v_v, v_r = "risky", f"RAM {ram:.1f} GB 落在灰色地帶（8-16 GB），需實機探針確認：{v_r}"
@@ -126,6 +202,9 @@ def main():
         f"mlx={'yes' if mlx else 'no'}",
         f"ram_gb={ram:.1f}",
         f"metal_working_set_gib={ws:.2f}" if ws else "metal_working_set_gib=unknown",
+        f"speed_hint={speed_hint(ram)}",
+        f"breeze_weights_gib={breeze_w:.2f} ({breeze_src})",
+        f"vv_weights_gib={vv_w:.2f} ({vv_src})",
         f"breeze_local={b_v}",
         f"vv_local={v_v}",
         f"reason=Breeze: {b_r}｜VibeVoice: {v_r}",

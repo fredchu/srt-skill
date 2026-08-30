@@ -911,6 +911,20 @@ cleanup() {
     trap - EXIT INT TERM HUP QUIT
     set +e
 
+    # 先把還活著的子程序收掉，再做其他清理。
+    #
+    # 為什麼不能省：maybe_timeout 在沒有 coreutils 的機器上會把命令丟到背景跑。
+    # 收到 SIGTERM 時 trap 會在父程序這邊觸發，但那個背景的 ssh/scp **不會死**。
+    # 它可能在父程序已經宣告失敗之後，才把半成品 SRT 寫進 OUTPUT_DIR。
+    #
+    # 而 subtitle.sh 找輸出的方式是「比標記檔新的 ${BASENAME}*.srt」（第 359 行）。
+    # 使用者 Ctrl-C 之後立刻重跑同一支影片，第二次就會把第一次的半成品撿走
+    # 當成自己的產物——不報錯，資料是錯的。這是靜默失效，不是浪費資源。
+    #
+    # 在 macOS 內建 bash 3.2 上實測過：SIGTERM 後確實留下存活的子程序。
+    # （Fable review-20 指出真正的風險不是計費而是髒資料。）
+    pkill -TERM -P $$ 2>/dev/null || true
+
     if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
         if [[ -f "$REMOTE_CUDA_CHECK_SCRIPT" ]]; then rm -f "$REMOTE_CUDA_CHECK_SCRIPT"; fi
         if [[ -f "$REMOTE_INSTALL_SCRIPT" ]]; then rm -f "$REMOTE_INSTALL_SCRIPT"; fi
