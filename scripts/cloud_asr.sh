@@ -35,8 +35,13 @@ SSH_COMMAND_TIMEOUT_SECONDS="${SSH_COMMAND_TIMEOUT_SECONDS:-1800}"
 POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-15}"
 SSH_READY_TIMEOUT_SECONDS="${SSH_READY_TIMEOUT_SECONDS:-420}"
 REMOTE_MODEL_ID="SoybeanMilk/faster-whisper-Breeze-ASR-25"
+REMOTE_VV_MODEL_ID="microsoft/VibeVoice-ASR-HF"
 REMOTE_AUDIO_DIR="/root/in"
 REMOTE_OUTPUT_DIR="/root/out"
+VV_TERMS_FILE=""
+VV_TERMS_MAX=50
+VV_JSON_ENABLED=false
+ASR_MODE=""
 COST_CAP_SECONDS="$({
     RUNPOD_ESTIMATED_RATE_PER_HR="$RUNPOD_ESTIMATED_RATE_PER_HR" \
     COST_CAP_USD="$COST_CAP_USD" \
@@ -79,7 +84,7 @@ TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 
 show_help() {
     cat <<EOF
-Usage: cloud_asr.sh <wav_path> <output_dir> <output_basename> <language> --breeze
+Usage: cloud_asr.sh <wav_path> <output_dir> <output_basename> <language> (--breeze|--vv) [--terms FILE] [--terms-max N] [--json]
 
 Run cloud ASR on a RunPod 4090 pod, fetch the raw JSON, and render the final SRT.
 
@@ -88,7 +93,11 @@ Arguments:
   <output_dir>        Output directory.
   <output_basename>   Output basename without extension.
   <language>          Transcription language.
-  --breeze            Required. The only supported cloud mode.
+  --breeze            Breeze cloud mode (existing behavior).
+  --vv                VibeVoice cloud mode.
+  --terms FILE        Optional VibeVoice prompt terms file.
+  --terms-max N       Prompt terms limit (default: 50).
+  --json              Keep <basename>_vibevoice.json (VV mode only).
 
 Rejected:
   --turbo             Not tested on cloud.
@@ -101,6 +110,7 @@ Environment:
   SSH_PRIVATE_KEY          SSH private key path (default: ${SSH_PRIVATE_KEY}).
   SSH_READY_TIMEOUT_SECONDS Max wait for direct SSH endpoint + probe (default: ${SSH_READY_TIMEOUT_SECONDS}).
   CLOUD_ASR_FAIL_STEP      Optional fault injection hook; set to 6 to fail before ASR.
+  CLOUD_VV_FAIL_STEP       Optional VV fault injection hook; set to inference to fail before remote generate.
   CLOUD_ASR_TEST_HOOK      Mock hook: provisioning_retry, delete_failure, signal_cleanup.
   COST_CAP_USD             Override per-call budget cap (default: ${COST_CAP_USD}).
 
@@ -216,6 +226,36 @@ mock_write_file() {
     local value="$2"
 
     printf '%s\n' "$value" >"$file"
+}
+
+build_vv_prompt() {
+    local terms_file="$1"
+    local terms_max="$2"
+
+    if [[ -z "$terms_file" ]]; then
+        printf ''
+        return 0
+    fi
+
+    python3 - "$terms_file" "$terms_max" <<'PY'
+from __future__ import annotations
+
+import pathlib
+import sys
+
+terms_path = pathlib.Path(sys.argv[1])
+terms_max = int(sys.argv[2])
+terms: list[str] = []
+# ⚠️ 這裡照抄本地 vibevoice_asr.py:103 的做法（照檔案順序取前 N 個，無排序）。
+# 這是已知缺陷而非設計；本輪刻意維持雲端與本地行為一致，不在此修排序策略。
+# 詳見 company/_shared/collab/20260829-srt-cloud-asr-runpod/ISSUE-terms-truncation-silent-decay.md
+for line in terms_path.read_text(encoding='utf-8').splitlines():
+    line = line.strip()
+    if not line or line.startswith('#'):
+        continue
+    terms.append(line)
+print(', '.join(terms[:terms_max]))
+PY
 }
 
 append_pod_attempt_log() {
@@ -707,9 +747,35 @@ scp_download() {
 
     if [[ -n "${CLOUD_ASR_TEST_HOOK:-}" ]]; then
         mkdir -p "$(dirname "$local_path")"
-        case "$local_path" in
+        case "$(basename "$local_path")" in
+            pod_id.txt)
+                printf '%s\n' "$POD_ID" >"$local_path"
+                ;;
+            terms_sent.txt)
+                printf '%s\n' "$VV_PROMPT" >"$local_path"
+                ;;
+            vv_env.json)
+                if [[ -n "${CLOUD_ASR_TEST_VV_ENV_JSON_FILE:-}" && -r "$CLOUD_ASR_TEST_VV_ENV_JSON_FILE" ]]; then
+                    cat "$CLOUD_ASR_TEST_VV_ENV_JSON_FILE" >"$local_path"
+                else
+                    printf '[]\n' >"$local_path"
+                fi
+                ;;
+            vv_run.json)
+                if [[ -n "${CLOUD_ASR_TEST_VV_RUN_JSON_FILE:-}" && -r "$CLOUD_ASR_TEST_VV_RUN_JSON_FILE" ]]; then
+                    cat "$CLOUD_ASR_TEST_VV_RUN_JSON_FILE" >"$local_path"
+                else
+                    printf '[]\n' >"$local_path"
+                fi
+                ;;
             *.json)
-                printf '[]\n' >"$local_path"
+                if [[ -n "${CLOUD_ASR_TEST_JSON_PAYLOAD_FILE:-}" && -r "$CLOUD_ASR_TEST_JSON_PAYLOAD_FILE" ]]; then
+                    cat "$CLOUD_ASR_TEST_JSON_PAYLOAD_FILE" >"$local_path"
+                elif [[ -n "${CLOUD_ASR_TEST_JSON_PAYLOAD:-}" ]]; then
+                    printf '%s\n' "$CLOUD_ASR_TEST_JSON_PAYLOAD" >"$local_path"
+                else
+                    printf '[]\n' >"$local_path"
+                fi
                 ;;
             *)
                 : >"$local_path"
@@ -899,6 +965,657 @@ EOF
     chmod 700 "$REMOTE_CUDA_CHECK_SCRIPT" "$REMOTE_INSTALL_SCRIPT" "$REMOTE_ASR_SCRIPT" "$REMOTE_PREP_DIRS_SCRIPT"
 }
 
+write_vv_remote_scripts() {
+    REMOTE_JSON_PATH="${REMOTE_OUTPUT_DIR}/${BASENAME}.vv.raw.json"
+    REMOTE_CUDA_CHECK_SCRIPT="${TMP_DIR}/remote_vv_cuda_check.sh"
+    REMOTE_INSTALL_SCRIPT="${TMP_DIR}/remote_vv_install_env.sh"
+    REMOTE_PREP_DIRS_SCRIPT="${TMP_DIR}/remote_vv_prep_dirs.sh"
+    REMOTE_EVIDENCE_SCRIPT="${TMP_DIR}/remote_vv_evidence.sh"
+    REMOTE_ASR_SCRIPT="${TMP_DIR}/remote_vv_asr.sh"
+
+    local remote_model_id_q remote_audio_path_q remote_json_path_q remote_prompt_q remote_env_dir_q remote_evidence_json_q remote_pod_id_q
+    printf -v remote_model_id_q '%q' "$REMOTE_VV_MODEL_ID"
+    printf -v remote_audio_path_q '%q' "$REMOTE_FLAC_PATH"
+    printf -v remote_json_path_q '%q' "$REMOTE_JSON_PATH"
+    printf -v remote_prompt_q '%q' "$VV_PROMPT"
+    printf -v remote_env_dir_q '%q' "${REMOTE_OUTPUT_DIR}/env"
+    printf -v remote_evidence_json_q '%q' "${REMOTE_OUTPUT_DIR}/env/vv_env.json"
+    printf -v remote_pod_id_q '%q' "$POD_ID"
+
+    cat >"$REMOTE_CUDA_CHECK_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - <<'PY'
+import torch
+print(torch.cuda.is_available())
+PY
+EOF
+
+    cat >"$REMOTE_INSTALL_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 -m pip install --break-system-packages \
+  'transformers==5.16.1' 'accelerate==1.13.0' 'huggingface-hub==1.5.0' \
+  'librosa==0.11.0' 'soundfile==0.13.1' sentencepiece
+command -v ffmpeg
+command -v ffprobe
+python3 - <<'PY'
+import transformers
+print(f"VibeVoice import gate: transformers={transformers.__version__}", flush=True)
+if not transformers.__version__.startswith("5.16."):
+    raise RuntimeError(f"expected transformers 5.16.x, got {transformers.__version__}")
+from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
+print("VibeVoice import gate: PASS AutoProcessor + VibeVoiceAsrForConditionalGeneration", flush=True)
+PY
+EOF
+
+    cat >"$REMOTE_PREP_DIRS_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p /root/in /root/out /root/bench /root/out/env
+EOF
+
+    cat >"$REMOTE_EVIDENCE_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export CLOUD_VV_MODEL_ID=$remote_model_id_q
+export CLOUD_VV_PROMPT=$remote_prompt_q
+export CLOUD_VV_ENV_DIR=$remote_env_dir_q
+export CLOUD_VV_EVIDENCE_JSON=$remote_evidence_json_q
+export CLOUD_VV_POD_ID=$remote_pod_id_q
+mkdir -p "\$CLOUD_VV_ENV_DIR"
+printf '%s\n' "\$CLOUD_VV_POD_ID" > "\$CLOUD_VV_ENV_DIR/pod_id.txt"
+python3 - <<'PY' > "\$CLOUD_VV_EVIDENCE_JSON"
+import json
+import sys
+from pathlib import Path
+
+import huggingface_hub
+import torch
+import transformers
+
+print(json.dumps({
+    "python": sys.version.split()[0],
+    "torch": torch.__version__,
+    "cuda": torch.version.cuda,
+    "transformers": transformers.__version__,
+    "huggingface_hub": huggingface_hub.__version__,
+    "cuda_available": torch.cuda.is_available(),
+    "hf_home": str(Path.home() / ".cache" / "huggingface"),
+}, ensure_ascii=False, indent=2))
+PY
+nvidia-smi > "\$CLOUD_VV_ENV_DIR/nvidia-smi.txt" 2>&1
+python3 -m pip list > "\$CLOUD_VV_ENV_DIR/pip_list.txt"
+printf '%s\n' "\$CLOUD_VV_MODEL_ID" > "\$CLOUD_VV_ENV_DIR/model_id.txt"
+printf '%s\n' "\$CLOUD_VV_PROMPT" > "\$CLOUD_VV_ENV_DIR/prompt.txt"
+printf '%s\n' "\$CLOUD_VV_PROMPT" > "\$CLOUD_VV_ENV_DIR/terms_sent.txt"
+EOF
+
+    cat >"$REMOTE_ASR_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export CLOUD_VV_MODEL_ID=$remote_model_id_q
+export CLOUD_VV_AUDIO_PATH=$remote_audio_path_q
+export CLOUD_VV_JSON_PATH=$remote_json_path_q
+export CLOUD_VV_PROMPT=$remote_prompt_q
+export CLOUD_VV_ENV_DIR=$remote_env_dir_q
+python3 -u - <<'PY'
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+import torch
+from huggingface_hub import snapshot_download
+from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
+
+MODEL_ID = os.environ["CLOUD_VV_MODEL_ID"]
+AUDIO_PATH = Path(os.environ["CLOUD_VV_AUDIO_PATH"])
+RAW_JSON_PATH = Path(os.environ["CLOUD_VV_JSON_PATH"])
+EVIDENCE_DIR = Path(os.environ["CLOUD_VV_ENV_DIR"])
+PROMPT = os.environ.get("CLOUD_VV_PROMPT", "")
+MAX_PART_SEC = 3000.0
+LONG_AUDIO_THRESHOLD_SEC = 55 * 60
+
+
+def run_capture(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, check=True, text=True, capture_output=True)
+
+
+def ffprobe_duration(path: Path) -> float:
+    proc = run_capture([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+    ])
+    return float(proc.stdout.strip())
+
+
+def detect_silence_ends(path: Path) -> list[float]:
+    proc = subprocess.run([
+        "ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
+        "-af", "silencedetect=noise=-30dB:d=0.5", "-f", "null", "-",
+    ], check=True, text=True, capture_output=True)
+    return [float(match.group(1)) for match in re.finditer(r"silence_end:\s*([0-9.]+)", proc.stderr)]
+
+
+def choose_cut_points(total_sec: float, max_part_sec: float, silence_ends: list[float]) -> list[float]:
+    if total_sec <= max_part_sec:
+        return []
+    part_count = int(math.ceil(total_sec / max_part_sec))
+    spacing = total_sec / part_count
+    usable_silences = sorted({round(s, 6) for s in silence_ends if 0 < s < total_sec})
+    cuts: list[float] = []
+    for i in range(1, part_count):
+        ideal = spacing * i
+        nearby = [s for s in usable_silences if s not in cuts and abs(s - ideal) <= 300.0]
+        if nearby:
+            chosen = min(nearby, key=lambda s: (abs(s - ideal), s))
+        else:
+            # A hard cut is safer than selecting a distant silence that creates a >60-minute part.
+            chosen = ideal
+        if 0 < chosen < total_sec and chosen not in cuts:
+            cuts.append(chosen)
+    return sorted(cuts)
+
+
+def part_ranges(total_sec: float, cut_points: list[float]) -> list[dict[str, float]]:
+    points = [0.0, *sorted(cut_points), total_sec]
+    return [
+        {"start": points[i], "end": points[i + 1], "dur": points[i + 1] - points[i]}
+        for i in range(len(points) - 1)
+    ]
+
+
+def cut_part(media_file: Path, output_wav: Path, start: float, duration: float) -> None:
+    subprocess.run([
+        "ffmpeg", "-hide_banner", "-nostats", "-y",
+        "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
+        "-i", str(media_file),
+        "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+        str(output_wav),
+    ], check=True)
+
+
+def seconds_to_srt_time(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0.0
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    if ms >= 1000:
+        ms = 999
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def normalize_segment(segment: dict[str, object], offset: float) -> dict[str, object] | None:
+    start = segment.get("Start", segment.get("start", segment.get("start_time", 0.0)))
+    end = segment.get("End", segment.get("end", segment.get("end_time", 0.0)))
+    text = segment.get("Content", segment.get("text", ""))
+    if not isinstance(text, str):
+        text = str(text)
+    text = text.strip()
+    if not text or text == "[Silence]":
+        return None
+    return {"start": float(start) + offset, "end": float(end) + offset, "text": text}
+
+
+def compact_text(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
+def stitch_segments(segments: list[dict[str, object]]) -> list[dict[str, object]]:
+    stitched: list[dict[str, object]] = []
+    for segment in segments:
+        if not stitched:
+            stitched.append(segment)
+            continue
+        prev = stitched[-1]
+        if compact_text(str(segment["text"])) == compact_text(str(prev["text"])) and float(segment["start"]) - float(prev["end"]) <= 1.0:
+            prev["end"] = max(float(prev["end"]), float(segment["end"]))
+            continue
+        if float(segment["start"]) < float(prev["end"]):
+            segment = dict(segment)
+            segment["start"] = float(prev["end"])
+        if float(segment["end"]) <= float(segment["start"]):
+            continue
+        stitched.append(segment)
+    return stitched
+
+
+def write_json(path: Path, value: object) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def transcribe_part(processor, model, audio: Path, prompt: str) -> tuple[list[dict[str, object]], float]:
+    request = {"audio": str(audio)}
+    if prompt:
+        request["prompt"] = prompt
+    inputs = processor.apply_transcription_request(**request).to(model.device, model.dtype)
+    started = time.monotonic()
+    output_ids = model.generate(**inputs, max_new_tokens=32768, do_sample=False)
+    inference_s = time.monotonic() - started
+    generated = output_ids[:, inputs["input_ids"].shape[1]:]
+    parsed = processor.decode(generated, return_format="parsed")
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], list):
+        parsed = parsed[0]
+    segments: list[dict[str, object]] = []
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict):
+                normalized = normalize_segment(item, 0.0)
+                if normalized is not None:
+                    segments.append(normalized)
+    return segments, inference_s
+
+
+if not torch.cuda.is_available():
+    raise SystemExit("torch.cuda.is_available() is False on the remote pod")
+
+RAW_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+
+started_at = time.monotonic()
+snapshot_started = time.monotonic()
+snapshot = snapshot_download(MODEL_ID)
+snapshot_download_s = time.monotonic() - snapshot_started
+processor_started = time.monotonic()
+processor = AutoProcessor.from_pretrained(snapshot, local_files_only=True)
+processor_load_s = time.monotonic() - processor_started
+model_started = time.monotonic()
+# Do not force attn_implementation on the composite model: doing so propagates
+# SDPA into the acoustic-tokenizer encoder, which does not support it. The
+# verified transformers 5.16.1 recipe selects SDPA for the top-level decoder
+# while leaving incompatible submodels on their supported implementation.
+model = VibeVoiceAsrForConditionalGeneration.from_pretrained(
+    snapshot,
+    local_files_only=True,
+    device_map="auto",
+)
+model_load_s = time.monotonic() - model_started
+implementation = getattr(model.config, "_attn_implementation", None)
+print(f"VibeVoice attention gate: model.config._attn_implementation={implementation}", flush=True)
+if implementation not in ("sdpa", "flash_attention_2"):
+    raise RuntimeError(
+        f"unsafe attention implementation {implementation!r}; expected sdpa or flash_attention_2"
+    )
+
+audio_seconds = ffprobe_duration(AUDIO_PATH)
+silence_ends = detect_silence_ends(AUDIO_PATH)
+cut_points = choose_cut_points(audio_seconds, MAX_PART_SEC if audio_seconds > LONG_AUDIO_THRESHOLD_SEC else max(MAX_PART_SEC, audio_seconds), silence_ends)
+ranges = part_ranges(audio_seconds, cut_points)
+for part_index, part in enumerate(ranges, start=1):
+    if float(part["dur"]) > 3600.0:
+        raise RuntimeError(
+            f"VibeVoice part {part_index} exceeds 60-minute limit: "
+            f"duration={float(part['dur']):.3f}s cut_points={cut_points}"
+        )
+
+merged_segments: list[dict[str, object]] = []
+chunk_timings: list[dict[str, object]] = []
+with tempfile.TemporaryDirectory(prefix="vvparts-", dir=str(RAW_JSON_PATH.parent)) as tmpdir:
+    tmpdir_path = Path(tmpdir)
+    for index, part in enumerate(ranges, start=1):
+        part_wav = tmpdir_path / f"part{index}.wav"
+        cut_part(AUDIO_PATH, part_wav, float(part["start"]), float(part["dur"]))
+        chunk_started = time.monotonic()
+        chunk_segments, infer_s = transcribe_part(processor, model, part_wav, PROMPT)
+        chunk_elapsed = time.monotonic() - chunk_started
+        offset = float(part["start"])
+        for segment in chunk_segments:
+            merged_segments.append({
+                "start": float(segment["start"]) + offset,
+                "end": float(segment["end"]) + offset,
+                "text": str(segment["text"]),
+            })
+        chunk_timings.append({
+            "index": index,
+            "offset": offset,
+            "duration": float(part["dur"]),
+            "segments": len(chunk_segments),
+            "inference_s": infer_s,
+            "chunk_elapsed_s": chunk_elapsed,
+        })
+
+merged_segments = stitch_segments(sorted(merged_segments, key=lambda item: (float(item["start"]), float(item["end"]))))
+write_json(RAW_JSON_PATH, merged_segments)
+write_json(EVIDENCE_DIR / "vv_run.json", {
+    "model_id": MODEL_ID,
+    "snapshot": snapshot,
+    "transformers": __import__("transformers").__version__,
+    "torch": torch.__version__,
+    "cuda": torch.version.cuda,
+    "implementation": implementation,
+    "snapshot_download_s": snapshot_download_s,
+    "processor_load_s": processor_load_s,
+    "model_load_s": model_load_s,
+    "audio_seconds": audio_seconds,
+    "cut_points": cut_points,
+    "parts": len(ranges),
+    "segments": len(merged_segments),
+    "chunk_timings": chunk_timings,
+    "total_elapsed_s": time.monotonic() - started_at,
+    "prompt_terms": len([term for term in PROMPT.split(', ') if term]) if PROMPT else 0,
+})
+print(json.dumps({
+    "snapshot_download_s": snapshot_download_s,
+    "processor_load_s": processor_load_s,
+    "model_load_s": model_load_s,
+    "parts": len(ranges),
+    "segments": len(merged_segments),
+    "implementation": implementation,
+}, ensure_ascii=False, indent=2))
+PY
+EOF
+
+    chmod 700 "$REMOTE_CUDA_CHECK_SCRIPT" "$REMOTE_INSTALL_SCRIPT" "$REMOTE_ASR_SCRIPT" "$REMOTE_PREP_DIRS_SCRIPT" "$REMOTE_EVIDENCE_SCRIPT"
+}
+
+run_vv_mode() {
+    VV_PROMPT=""
+    if [[ -n "$VV_TERMS_FILE" ]]; then
+        [[ -r "$VV_TERMS_FILE" ]] || die "VV terms file not found: $VV_TERMS_FILE"
+        case "$VV_TERMS_MAX" in
+            ''|*[!0-9]*) die "invalid --terms-max: $VV_TERMS_MAX" ;;
+        esac
+        VV_PROMPT="$(build_vv_prompt "$VV_TERMS_FILE" "$VV_TERMS_MAX")"
+        local vv_terms_total vv_terms_sent
+        vv_terms_total="$(awk '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$VV_TERMS_FILE")"
+        vv_terms_sent="$vv_terms_total"
+        if (( vv_terms_sent > VV_TERMS_MAX )); then vv_terms_sent="$VV_TERMS_MAX"; fi
+        info "terms: 送出 ${vv_terms_sent} / 共 ${vv_terms_total} 個（取檔案前 ${VV_TERMS_MAX}，未排序）"
+    fi
+
+    info "budget cap: ${COST_CAP_USD} USD (~${COST_CAP_SECONDS}s at ~${RUNPOD_ESTIMATED_RATE_PER_HR}/hr)"
+
+    ATTEMPT=0
+    while :; do
+        ATTEMPT=$((ATTEMPT + 1))
+        if (( ATTEMPT > 3 )); then
+            die "direct endpoint unavailable after 3 pods; giving up"
+        fi
+
+        create_pod
+        POD_ATTEMPT_STARTED_AT="$(date +%s)"
+        REMOTE_FLAC_PATH="${REMOTE_AUDIO_DIR}/${BASENAME}.flac"
+        write_vv_remote_scripts
+
+        if wait_for_ssh_ready; then
+            status=0
+        else
+            status=$?
+        fi
+        if [[ $status -eq 0 ]]; then
+            break
+        fi
+        if [[ $status -eq 124 ]]; then
+            if ! terminate_pod; then
+                die "timed out waiting for direct SSH on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
+            fi
+            if (( ATTEMPT >= 3 )); then
+                die "direct endpoint unavailable after 3 pods; giving up"
+            fi
+            continue
+        fi
+
+        if [[ $status -eq 42 ]]; then
+            if ! terminate_pod; then
+                die "SSH public key denied by RunPod backend after pod $POD_ID could not be terminated: ${TERMINATE_LAST_ERROR:-<unknown>}"
+            fi
+            die "SSH public key denied by RunPod backend"
+        fi
+
+        if ! terminate_pod; then
+            die "failed while waiting for direct SSH on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
+        fi
+        die "failed while waiting for direct SSH on pod $POD_ID"
+    done
+
+    info "direct endpoint ready on pod $POD_ID"
+    check_cost_cap
+
+    if cuda_probe_output="$(ssh_run_script "cuda_check" "$POD_IP" "$POD_PORT" "$REMOTE_CUDA_CHECK_SCRIPT")"; then
+        case "$(tail -n 1 <<<"$cuda_probe_output")" in
+            True)
+                :
+                ;;
+            False)
+                if ! terminate_pod; then
+                    die "torch.cuda.is_available() returned False on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
+                fi
+                die "torch.cuda.is_available() returned False on pod $POD_ID"
+                ;;
+            *)
+                if ! terminate_pod; then
+                    die "torch.cuda.is_available() returned unexpected output on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
+                fi
+                die "torch.cuda.is_available() returned unexpected output on pod $POD_ID"
+                ;;
+        esac
+    else
+        status=$?
+        if [[ $status -eq 42 ]]; then
+            if ! terminate_pod; then
+                die "SSH public key denied by RunPod backend after pod $POD_ID could not be terminated: ${TERMINATE_LAST_ERROR:-<unknown>}"
+            fi
+            die "SSH public key denied by RunPod backend"
+        fi
+        if ! terminate_pod; then
+            die "torch.cuda.is_available() failed on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
+        fi
+        die "torch.cuda.is_available() failed on pod $POD_ID (exit $status)"
+    fi
+    info "CUDA validated on pod $POD_ID"
+    check_cost_cap
+
+    if ssh_run_script "install_env" "$POD_IP" "$POD_PORT" "$REMOTE_INSTALL_SCRIPT"; then
+        :
+    else
+        status=$?
+        terminate_pod || true
+        if [[ $status -eq 42 ]]; then
+            die "SSH public key denied by RunPod backend"
+        fi
+        die "install_env failed on pod $POD_ID (exit $status)"
+    fi
+    check_cost_cap
+
+    LOCAL_FLAC_PATH="${TMP_DIR}/${BASENAME}.flac"
+    LOCAL_JSON_PATH="${TMP_DIR}/${BASENAME}.vv.raw.json"
+    LOCAL_SRT_PATH="${OUTPUT_DIR}/${BASENAME}_vibevoice.srt"
+    local LOCAL_VV_JSON_PATH="${TMP_DIR}/${BASENAME}_vibevoice.json"
+    if [[ "$VV_JSON_ENABLED" == true ]]; then
+        LOCAL_VV_JSON_PATH="${OUTPUT_DIR}/${BASENAME}_vibevoice.json"
+    fi
+
+    info "converting input WAV to FLAC"
+    ffmpeg -y -i "$WAV_PATH" -ar 16000 -ac 1 -c:a flac -compression_level 12 "$LOCAL_FLAC_PATH" >/dev/null 2>&1
+    check_cost_cap
+
+    info "preparing remote directories on root@$POD_IP -p $POD_PORT"
+    if ssh_run_script "prepare_remote_dirs" "$POD_IP" "$POD_PORT" "$REMOTE_PREP_DIRS_SCRIPT"; then
+        :
+    else
+        status=$?
+        terminate_pod || true
+        if [[ $status -eq 42 ]]; then
+            die "SSH public key denied by RunPod backend"
+        fi
+        die "remote directory preparation failed on pod $POD_ID (exit $status)"
+    fi
+    check_cost_cap
+
+    info "uploading FLAC to root@$POD_IP -p $POD_PORT"
+    if scp_upload "$LOCAL_FLAC_PATH" "$POD_IP" "$POD_PORT" "$REMOTE_AUDIO_DIR/${BASENAME}.flac"; then
+        :
+    else
+        status=$?
+        terminate_pod || true
+        if [[ $status -eq 42 ]]; then
+            die "SSH public key denied by RunPod backend"
+        fi
+        die "FLAC upload failed to root@$POD_IP -p $POD_PORT (exit $status)"
+    fi
+    check_cost_cap
+
+    info "collecting pod evidence on pod $POD_ID before fault injection"
+    if ssh_run_script "collect_evidence" "$POD_IP" "$POD_PORT" "$REMOTE_EVIDENCE_SCRIPT"; then
+        :
+    else
+        status=$?
+        terminate_pod || true
+        if [[ $status -eq 42 ]]; then
+            die "SSH public key denied by RunPod backend"
+        fi
+        die "evidence collection failed on pod $POD_ID (exit $status)"
+    fi
+
+    mkdir -p "$OUTPUT_DIR/env"
+    for evidence_path in "$OUTPUT_DIR/env/vv_env.json" "$OUTPUT_DIR/env/pod_id.txt" "$OUTPUT_DIR/env/nvidia-smi.txt" "$OUTPUT_DIR/env/pip_list.txt" "$OUTPUT_DIR/env/terms_sent.txt"; do
+        if [[ -e "$evidence_path" ]]; then
+            die "refusing to overwrite existing evidence file: $evidence_path"
+        fi
+    done
+    info "downloading pod evidence from pod $POD_ID"
+    if scp_download "$POD_IP" "$POD_PORT" "${REMOTE_OUTPUT_DIR}/env/vv_env.json" "$OUTPUT_DIR/env/vv_env.json"; then
+        :
+    else
+        status=$?
+        terminate_pod || true
+        if [[ $status -eq 42 ]]; then
+            die "SSH public key denied by RunPod backend"
+        fi
+        die "vv evidence download failed from root@$POD_IP -p $POD_PORT (exit $status)"
+    fi
+    if scp_download "$POD_IP" "$POD_PORT" "${REMOTE_OUTPUT_DIR}/env/pod_id.txt" "$OUTPUT_DIR/env/pod_id.txt"; then
+        :
+    else
+        status=$?
+        terminate_pod || true
+        if [[ $status -eq 42 ]]; then
+            die "SSH public key denied by RunPod backend"
+        fi
+        die "pod id evidence download failed from root@$POD_IP -p $POD_PORT (exit $status)"
+    fi
+    for evidence_name in nvidia-smi.txt pip_list.txt terms_sent.txt; do
+        if scp_download "$POD_IP" "$POD_PORT" "${REMOTE_OUTPUT_DIR}/env/${evidence_name}" "$OUTPUT_DIR/env/${evidence_name}"; then
+            :
+        else
+            status=$?
+            terminate_pod || true
+            if [[ $status -eq 42 ]]; then die "SSH public key denied by RunPod backend"; fi
+            die "VV evidence ${evidence_name} download failed from root@$POD_IP -p $POD_PORT (exit $status)"
+        fi
+    done
+    if [[ "$(tr -d '\r\n' < "$OUTPUT_DIR/env/pod_id.txt")" != "$POD_ID" ]]; then
+        terminate_pod || true
+        die "pod id evidence mismatch after download: expected $POD_ID"
+    fi
+    if [[ -f "$OUTPUT_DIR/env/vv_env.json" ]]; then
+        true
+    fi
+    check_cost_cap
+
+    if [[ "${CLOUD_VV_FAIL_STEP:-}" == "inference" ]]; then
+        die "fault injection: deliberately failing before VV inference"
+    fi
+    info "running VibeVoice-ASR-HF sdpa bf16 on pod $POD_ID"
+    if ssh_run_script "asr" "$POD_IP" "$POD_PORT" "$REMOTE_ASR_SCRIPT"; then
+        :
+    else
+        status=$?
+        terminate_pod || true
+        if [[ $status -eq 42 ]]; then
+            die "SSH public key denied by RunPod backend"
+        fi
+        die "VV ASR failed on pod $POD_ID (exit $status)"
+    fi
+    check_cost_cap
+
+    info "downloading raw JSON from pod $POD_ID"
+    if scp_download "$POD_IP" "$POD_PORT" "$REMOTE_JSON_PATH" "$LOCAL_JSON_PATH"; then
+        :
+    else
+        status=$?
+        terminate_pod || true
+        if [[ $status -eq 42 ]]; then
+            die "SSH public key denied by RunPod backend"
+        fi
+        die "VV JSON download failed from root@$POD_IP -p $POD_PORT (exit $status)"
+    fi
+    if scp_download "$POD_IP" "$POD_PORT" "${REMOTE_OUTPUT_DIR}/env/vv_run.json" "$OUTPUT_DIR/env/vv_run.json"; then
+        :
+    else
+        status=$?
+        terminate_pod || true
+        if [[ $status -eq 42 ]]; then
+            die "SSH public key denied by RunPod backend"
+        fi
+        die "VV timing evidence download failed from root@$POD_IP -p $POD_PORT (exit $status)"
+    fi
+    check_cost_cap
+
+    info "normalizing VibeVoice JSON"
+    python3 "$SCRIPT_DIR/cloud_to_srt.py" vv "$LOCAL_JSON_PATH" "$LOCAL_VV_JSON_PATH"
+    check_cost_cap
+
+    info "rendering VibeVoice SRT"
+    python3 - "$LOCAL_VV_JSON_PATH" "$LOCAL_SRT_PATH" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+
+def ts(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0.0
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int(round((seconds - int(seconds)) * 1000))
+    if millis >= 1000:
+        millis = 999
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+payload = json.loads(src.read_text(encoding="utf-8"))
+if not isinstance(payload, list):
+    raise SystemExit("VV JSON is not a list")
+blocks: list[str] = []
+index = 0
+for item in payload:
+    if not isinstance(item, dict):
+        continue
+    text = str(item.get("text", "")).strip()
+    if not text:
+        continue
+    index += 1
+    start = float(item.get("start", 0.0))
+    end = float(item.get("end", 0.0))
+    blocks.append("\n".join([str(index), f"{ts(start)} --> {ts(end)}", text]))
+dst.write_text("\n\n".join(blocks) + ("\n" if blocks else ""), encoding="utf-8")
+PY
+    check_cost_cap
+
+    if [[ -f "$OUTPUT_DIR/env/vv_env.json" ]]; then
+        :
+    fi
+    info "completed cloud VV ASR: $LOCAL_SRT_PATH"
+    return 0
+}
+
 # shellcheck disable=SC2329 # invoked via trap EXIT/INT/TERM/HUP/QUIT
 cleanup() {
     local status=$?
@@ -960,25 +1677,53 @@ if [[ $# -lt 5 ]]; then
     exit 2
 fi
 
-if [[ $# -gt 6 ]]; then
-    error "invalid number of arguments"
-    show_help
-    exit 2
-fi
-
 WAV_PATH="$1"
 OUTPUT_DIR="$2"
 BASENAME="$3"
 LANGUAGE="$4"
-MODEL_FLAGS=("${@:5}")
+shift 4
+MODEL_FLAGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --breeze|--turbo|--vv)
+            MODEL_FLAGS+=("$1")
+            shift
+            ;;
+        --terms)
+            if [[ $# -lt 2 ]]; then
+                die "missing value for --terms"
+            fi
+            VV_TERMS_FILE="$2"
+            shift 2
+            ;;
+        --terms-max)
+            if [[ $# -lt 2 ]]; then
+                die "missing value for --terms-max"
+            fi
+            VV_TERMS_MAX="$2"
+            shift 2
+            ;;
+        --json)
+            VV_JSON_ENABLED=true
+            shift
+            ;;
+        *)
+            die "invalid argument: $1"
+            ;;
+    esac
+done
 
 case "${#MODEL_FLAGS[@]}" in
     1)
         case "${MODEL_FLAGS[0]}" in
             --breeze)
+                ASR_MODE="breeze"
                 ;;
             --turbo)
                 die "cloud ASR only supports --breeze; this configuration was not tested on cloud. Use subtitle.sh --breeze or revert to --engine=mlx."
+                ;;
+            --vv)
+                ASR_MODE="vv"
                 ;;
             *)
                 die "invalid model flag: ${MODEL_FLAGS[0]}"
@@ -995,6 +1740,10 @@ case "${#MODEL_FLAGS[@]}" in
         die "cloud ASR only supports --breeze"
         ;;
 esac
+
+if [[ "$ASR_MODE" == "breeze" && ( -n "$VV_TERMS_FILE" || "$VV_TERMS_MAX" != "50" || "$VV_JSON_ENABLED" == true ) ]]; then
+    die "VV options are only valid with --vv"
+fi
 
 # `[[ -v VAR ]]` 需要 bash 4.2 以上，但 macOS 內建的 /bin/bash 是 3.2.57
 # （蘋果因授權問題二十年沒更新），shebang 的 `env bash` 在沒裝 brew bash 的
@@ -1060,6 +1809,11 @@ mkdir -p "$OUTPUT_DIR/env"
 POD_ATTEMPTS_FILE="$OUTPUT_DIR/env/pod_attempts.txt"
 : >"$POD_ATTEMPTS_FILE"
 trap cleanup EXIT INT TERM HUP QUIT
+
+if [[ "$ASR_MODE" == "vv" ]]; then
+    run_vv_mode
+    exit $?
+fi
 
 info "budget cap: ${COST_CAP_USD} USD (~${COST_CAP_SECONDS}s at ~${RUNPOD_ESTIMATED_RATE_PER_HR}/hr)"
 

@@ -3,7 +3,7 @@
 
 雲端 benchmark 產的是研究用的原始 JSON，下游要的是：
   Breeze / Whisper → 真正的 .srt 檔（subtitle.sh 的格式）
-  VibeVoice        → 小寫 start/end/text 的 JSON（vibevoice_asr.py 的格式）
+  VibeVoice        → 小寫 start/end/text 的 JSON（不再做 OpenCC）
 
 用法：
   cloud_to_srt.py breeze <雲端 json> <輸出 .srt>
@@ -62,12 +62,11 @@ def to_vv_json(src, dst):
     segs = _segments(json.load(open(src, encoding="utf-8")))
     out = []
     for seg in segs:
+        t = _text(seg)
+        if not t:
+            continue
         a, b = _span(seg)
-        # 下游讀的是小寫；speaker 只在雲端有，保留但不是必要欄位
-        item = {"start": a, "end": b, "text": _text(seg)}
-        if "Speaker" in seg:
-            item["speaker"] = seg["Speaker"]
-        out.append(item)
+        out.append({"start": a, "end": b, "text": t})
     pathlib.Path(dst).write_text(
         json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     return len(out)
