@@ -55,3 +55,35 @@ def test_every_key_has_nonempty_value() -> None:
     for key in keys_subtitle_reads():
         m = re.search(rf"^{key}=(.*)$", out, re.M)
         assert m and m.group(1).strip(), f"{key} 的值是空的，subtitle.sh 會印預設字串"
+
+
+def test_stale_cache_from_old_schema_is_discarded(tmp_path, monkeypatch) -> None:
+    """舊欄位版本的快取必須被丟掉重算。
+
+    2026-08-30 真實事故：加了 `breeze_reason` 欄位之後，從舊版升級上來的機器
+    **快取裡還是舊格式**，`subtitle.sh` 取不到就落到預設字串「記憶體不足」——
+    而真因是「mlx_whisper 未安裝」。**照那個訊息使用者會去買記憶體。**
+
+    只比對 `host=` 不夠：主機沒變，變的是欄位。
+
+    ⚠️ 這個 bug 是發版清單第 7 步（在目標機器跑發布的標籤）抓到的。
+    本機測不出來，因為本機的快取一直是新的。
+    """
+    import os
+    fake_home = tmp_path / "home"
+    (fake_home / ".config/srt").mkdir(parents=True)
+    stale = fake_home / ".config/srt/capacity.conf"
+    stale.write_text(
+        f"host={os.uname().nodename}\nmlx=no\nbreeze_local=impossible\nreason=舊格式\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ, HOME=str(fake_home))
+    r = subprocess.run(
+        [sys.executable, str(PROBE)], capture_output=True, text=True, timeout=120, env=env
+    )
+    if r.returncode != 0:
+        pytest.skip(f"探針跑不起來：{r.stderr[:200]}")
+    assert "舊格式" not in r.stdout, (
+        "舊欄位版本的快取被沿用了：\n" + r.stdout)
+    assert "breeze_reason=" in r.stdout, (
+        "重算後應該有新欄位：\n" + r.stdout)

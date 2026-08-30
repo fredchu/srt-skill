@@ -71,6 +71,16 @@ def weights_gib(repo: str, fallback: float) -> tuple:
 
 CACHE = pathlib.Path.home() / ".config/srt/capacity.conf"
 
+# 快取的欄位版本。**加或改任何輸出欄位時必須把這個數字 +1。**
+#
+# 為什麼需要：2026-08-30 加了 breeze_reason / vv_reason 兩個欄位之後，
+# 從舊版升級上來的機器**快取裡還是舊格式**，subtitle.sh 取 breeze_reason 取不到，
+# 就落到預設字串「記憶體不足」——而真因是「mlx_whisper 未安裝」。
+# **照那個訊息使用者會去買記憶體。**
+#
+# 只比對 host= 不夠：主機沒變，變的是欄位。
+CACHE_SCHEMA = 2
+
 
 def ram_gb() -> float:
     try:
@@ -164,7 +174,9 @@ def speed_hint(ram_gb: float) -> str:
 def main():
     if "--no-cache" not in sys.argv and CACHE.is_file():
         cached = CACHE.read_text(encoding="utf-8")
-        if f"host={os.uname().nodename}" in cached:
+        same_host = f"host={os.uname().nodename}" in cached
+        same_schema = f"cache_schema={CACHE_SCHEMA}" in cached
+        if same_host and same_schema:
             print(cached.rstrip())
             return
 
@@ -198,6 +210,7 @@ def main():
                 v_v, v_r = "risky", f"RAM {ram:.1f} GB 落在灰色地帶（8-16 GB），需實機探針確認：{v_r}"
 
     lines = [
+        f"cache_schema={CACHE_SCHEMA}",
         f"host={os.uname().nodename}",
         f"mlx={'yes' if mlx else 'no'}",
         f"ram_gb={ram:.1f}",
