@@ -158,8 +158,28 @@ def find_anomalies(entries, gap_threshold_s=None):
 # 修復
 # ============================================================
 
+# 整支腳本總共可以呼叫幾次 ASR。**這是總量熔斷，不是每次呼叫的上限。**
+#
+# 為什麼需要：`cloud_asr.sh` 的 MAX_POD_ATTEMPTS 與 COST_CAP_USD 都是
+# **每次呼叫**的。而這支腳本會對「每個異常段 × 每段 10/20/30 秒三種 buffer」
+# 各呼叫一次——每次都開一台新機器、每次都重新拿到一份完整預算。
+#
+# 所以「我設了成本上限 0.10」實際上是「每台 0.10」，五台就是 0.50。
+# 2026-08-30 派工前 pi 的靜態審查抓到這條，當時預算只剩 US$0.11。
+#
+# 0 或未設＝不限制（本地路徑不花錢，沒必要擋）。
+_ASR_CALLS = 0
+
+
 def run_asr(wav_path, output_dir, use_breeze=True):
     """執行 ASR，回傳產出的 SRT 路徑。"""
+    global _ASR_CALLS
+    max_calls = int(os.environ.get('SRT_ASR_MAX_CALLS', '0'))
+    _ASR_CALLS += 1
+    if max_calls and _ASR_CALLS > max_calls:
+        print(f"  🛑 已達 ASR 呼叫總量上限 {max_calls} 次（SRT_ASR_MAX_CALLS），停止。"
+              f"雲端模式下每次呼叫都是一台新機器。", file=sys.stderr)
+        return None
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     subtitle_sh = os.path.join(script_dir, 'subtitle.sh')
 
@@ -167,7 +187,41 @@ def run_asr(wav_path, output_dir, use_breeze=True):
     if use_breeze:
         cmd.append('--breeze')
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # ⚠️ **不可以用 subprocess.run(timeout=)。**
+    #
+    # 它超時的時候是送 SIGKILL（2026-08-30 實測確認：子程序的 trap 完全沒跑）。
+    # 而 SIGKILL 攔不住 —— 所以 subtitle.sh → cloud_asr.sh 的 `trap cleanup`
+    # 不會執行，**租來的機器會留在雲端一直計費，而且沒有任何訊息**。
+    #
+    # 這條路有三段 buffer 重試（10/20/30 秒），每段都會開一台新機器，
+    # 所以最壞情況是三台機器同時被遺棄。
+    #
+    # 正確做法：先 SIGTERM 給 trap 一個機會，寬限之後才 SIGKILL。
+    # 寬限 60 秒是因為 cloud_asr.sh 的 cleanup 要打 API 砍機並回查清單確認，
+    # 實測約 4-8 秒，60 秒有足夠餘裕。
+    timeout_s = int(os.environ.get('SRT_ASR_TIMEOUT_SECONDS', '2400'))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        print(f"  ⏱ ASR 超過 {timeout_s} 秒，送 SIGTERM 讓它自己砍機器…", file=sys.stderr)
+        proc.terminate()
+        try:
+            stdout, stderr = proc.communicate(timeout=60)
+            print("  ✅ 它自己收乾淨了", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print("  🔴 60 秒內沒收乾淨，改用 SIGKILL —— "
+                  "雲端機器可能被遺棄，請跑 scripts/runpod_reap.sh 確認", file=sys.stderr)
+            proc.kill()
+            stdout, stderr = proc.communicate()
+        return None
+
+    class _R:
+        pass
+    result = _R()
+    result.returncode = proc.returncode
+    result.stdout = stdout
+    result.stderr = stderr
     if result.returncode != 0:
         print(f"  ❌ ASR 失敗: {result.stderr[-200:]}", file=sys.stderr)
         return None
