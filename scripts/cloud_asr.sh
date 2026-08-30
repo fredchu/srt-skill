@@ -965,7 +965,11 @@ case "${#MODEL_FLAGS[@]}" in
         ;;
 esac
 
-if [[ -v INITIAL_PROMPT ]]; then
+# `[[ -v VAR ]]` 需要 bash 4.2 以上，但 macOS 內建的 /bin/bash 是 3.2.57
+# （蘋果因授權問題二十年沒更新），shebang 的 `env bash` 在沒裝 brew bash 的
+# 機器上就會指到它，整支腳本在這行炸掉並回 exit 2。
+# `${VAR+x}` 是 3.2 就有的等價寫法：變數有設定就展開成 x，即使是空字串。
+if [[ -n "${INITIAL_PROMPT+x}" ]]; then
     die "INITIAL_PROMPT is not accepted by cloud_asr.sh"
 fi
 
