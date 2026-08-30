@@ -70,6 +70,28 @@ def max_duration_sec(entries):
     return max(max(0, entry["end_ms"] - entry["start_ms"]) for entry in entries) / 1000.0
 
 
+# 校正 subagent 偶爾會把自己的工具呼叫標籤漏進 SRT。實測（2026-08-30，
+# 109 分鐘影片 13 段）漏出 5 處 `</content>` 與 3 處 `</invoke>`。
+# 這些必須在合併就過濾——原本是靠 srt_postprocess.py 兜底，
+# 但那代表任何不經過後處理的路徑（例如只跑到 2b 就交件）會帶著標籤出貨。
+TOOL_RESIDUE_RE = re.compile(
+    r"</?(?:antml:)?(?:invoke|function_calls|parameter|content|result)\b[^>]*>",
+    re.IGNORECASE,
+)
+
+
+def strip_tool_residue(lines):
+    """回 (清理後的行, 清掉幾行)。整行只剩空白的就丟掉。"""
+    out, removed = [], 0
+    for line in lines:
+        cleaned = TOOL_RESIDUE_RE.sub("", line)
+        if cleaned.strip():
+            out.append(cleaned)
+        elif line.strip():
+            removed += 1  # 整行都是標籤
+    return out, removed
+
+
 def entry_text(entry):
     return "\n".join(entry["text_lines"])
 
@@ -199,6 +221,18 @@ def coverage_patch(entries, preprocessed_path):
 
 
 def write_srt(entries, output_path):
+    residue_removed = 0
+    for entry in entries:
+        cleaned, n = strip_tool_residue(entry["text_lines"])
+        residue_removed += n
+        if cleaned:
+            entry["text_lines"] = cleaned
+    if residue_removed:
+        print(
+            f"WARNING: stripped {residue_removed} tool-call residue lines "
+            f"leaked from correction subagents",
+            file=sys.stderr,
+        )
     with open(output_path, "w", encoding="utf-8") as f:
         for i, entry in enumerate(entries, 1):
             f.write(f"{i}\n")
