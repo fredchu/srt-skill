@@ -91,10 +91,11 @@ Step 2b 的 LLM 校正與 Step 2c 在別台執行——那兩步是純雲端 LLM
 
 - ⚠️ **VibeVoice 仍未上雲。** `cloud_asr.sh` 完全沒有 VibeVoice 的實作。
   走 `--engine=runpod` 時 Step 1' 會跳過，Step 2b 因此少了交叉參考（`vv_segments: 0`）。
-- ⚠️ **`scripts/asr_engine.sh` 目前沒有任何腳本使用。** 它實作了逐步驟的引擎解析
-  （`SRT_BREEZE_ENGINE` / `SRT_VV_ENGINE` / `SRT_FALLBACK_ENGINE`），單元行為驗過，
-  但還沒接進 `subtitle.sh` 與 `hallucination_fallback.sh`——**那些環境變數現在設了不會生效**。
-  在 VibeVoice 有雲端路徑之前，逐步驟選引擎也沒有實際用途。
+- ⚠️ **逐步驟選引擎（`SRT_BREEZE_ENGINE` 等）本版沒有。** 曾寫過 `scripts/asr_engine.sh`
+  並驗過五種優先序組合，但沒有接進任何腳本——設了不會生效。
+  **發布一個設了不會生效的旋鈕，正是這一版在修的那類 bug**，所以本版把它拿掉了。
+  程式碼留在 git 歷史：`git show 30a5bd2:scripts/asr_engine.sh`。
+  等 VibeVoice 有雲端路徑、真的需要分步驟選引擎時再接回來。
 - ⚠️ **`hallucination_fallback.sh`（Whisper large-v3 那條）仍綁 MLX**，
   雲端模式下會明確拒絕而不是默默跑。
 - ⚠️ **雲端輸出與本地不等價，仍不知道哪邊比較對。** 需要對真人聽打比對。
