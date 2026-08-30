@@ -13,7 +13,7 @@
 輸出（一行一個 key=value）：
   mlx=yes|no
   ram_gb=<float>
-  metal_working_set_gb=<float|unknown>
+  metal_working_set_gib=<float|unknown>
   breeze_local=ok|risky|impossible
   vv_local=ok|risky|impossible
   reason=<一句話>
@@ -45,11 +45,28 @@ def ram_gb() -> float:
 
 
 def has_mlx() -> bool:
+    """裝在虛擬環境裡的套件不會出現在 PATH 上，所以不能用 which 判斷。
+    （2026-08-30 實測：Mini CC 的 venv-mlx 明明裝好了，which 仍然找不到，
+    探針因此誤判「沒裝」。這是「which 找不到不等於沒裝」的經典陷阱。）
+    直接用目前這個直譯器試 import，才是真的答案。"""
+    r = subprocess.run(
+        [sys.executable, "-c", "import mlx_whisper"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if r.returncode == 0:
+        return True
+    # 退一步：模組沒有，但 CLI 在 PATH 上也算裝了
     return shutil.which("mlx_whisper") is not None
 
 
-def metal_working_set_gb():
-    """Metal 的工作集上限。超過它 MLX 是直接報 buffer 錯，不是變慢。"""
+def metal_working_set_gib():
+    """Metal 的工作集上限，單位 GiB（1024^3），不是 GB（10^9）。
+
+    ⚠️ 單位一定要跟模型大小對齊。同一台 8 GB 的 M1 量出來是
+    5.73 GB＝5.33 GiB，兩個數字都對但差 7%，混用會得到錯誤的餘裕。
+    模型權重習慣用 GiB 標示（VibeVoice 是 5.32 GiB），所以這裡統一用 GiB。
+
+    超過這個上限，MLX 是直接報 buffer 錯，不是變慢。"""
     try:
         out = subprocess.run(
             [sys.executable, "-c",
@@ -83,7 +100,7 @@ def main():
 
     mlx = has_mlx()
     ram = ram_gb()
-    ws = metal_working_set_gb()
+    ws = metal_working_set_gib()
     # 取不到工作集上限時，用 RAM 扣掉 macOS 常駐（保守 2.5 GB）當預算
     budget = ws if ws else max(0.0, ram - 2.5)
 
@@ -108,7 +125,7 @@ def main():
         f"host={os.uname().nodename}",
         f"mlx={'yes' if mlx else 'no'}",
         f"ram_gb={ram:.1f}",
-        f"metal_working_set_gb={ws:.2f}" if ws else "metal_working_set_gb=unknown",
+        f"metal_working_set_gib={ws:.2f}" if ws else "metal_working_set_gib=unknown",
         f"breeze_local={b_v}",
         f"vv_local={v_v}",
         f"reason=Breeze: {b_r}｜VibeVoice: {v_r}",
