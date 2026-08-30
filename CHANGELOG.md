@@ -1,5 +1,107 @@
 # Changelog
 
+## 1.8.0 - 2026-08-30
+
+> **這一版是「Breeze 上雲＋無 MLX 機器跑得完＋砍機安全網」，不是「全部 ASR 上雲」。**
+> 四條 ASR 路徑只有 Breeze（Step 1）真的上雲；VibeVoice 完全沒有雲端實作，
+> Whisper large-v3 備援在雲端模式明確拒絕，Step 1.5 的重跑理論上跟著上雲但沒實際觸發過。
+> 剩下三條**是還沒做完，不是做不到**。
+>
+> 實測平台：Mac mini M1、8 GB 記憶體、macOS 15.4.1，**沒有 MLX、沒有 coreutils、
+> 只有系統內建的 bash 3.2**。1.7.0 在這台機器上一步都跑不動。
+
+### 修復（全部是「開發機看不到、目標機一定撞」的那類）
+
+- **依賴檢查要跟著引擎走。** `--engine=runpod` 時仍無條件 `check_dependency mlx_whisper`，
+  於是沒有 MLX 的機器在第 1 步就死，永遠到不了雲端分流。引擎分流加在執行點，
+  檢查點沒跟上。改成 runpod 檢查 `curl`/`ssh`/`scp`/`python3`。
+
+- **`[[ -v VAR ]]` 需要 bash 4.2，macOS 內建是 3.2.57。** shebang 是 `env bash`，
+  在沒裝 homebrew bash 的機器上就指到它，`cloud_asr.sh` 整支報
+  `conditional binary operator expected` 並 exit 2。改用 `${VAR+x}`。
+
+- **沒有 `timeout` 時不可以裸跑命令。** `maybe_timeout` 原本在找不到
+  `timeout`/`gtimeout` 時直接執行。四個呼叫點全是 ssh/scp——**卡住不會產生任何訊號**，
+  於是 `trap cleanup EXIT INT TERM HUP QUIT` 永遠不觸發，pod 一直計費。
+  補了純 bash 的替代，逾時一律回 124 與 coreutils 對齊。
+
+  `<&0` 不可省：非互動 shell 的背景工作預設把 stdin 接到 /dev/null，
+  不加會讓 `ssh 'bash -se' <"$script_file"` 讀到空輸入、遠端靜默不做事也不報錯。
+
+- **`cleanup` 要收掉孤兒子程序**（`pkill -TERM -P $$`）。背景跑的 ssh/scp 在
+  SIGTERM 之後不會死，可能在父程序已宣告失敗之後才把半成品 SRT 寫進輸出目錄。
+  而 `subtitle.sh` 找輸出的方式是「比標記檔新的 `${BASENAME}*.srt`」，
+  於是使用者 Ctrl-C 後重跑，第二次會撿走第一次的半成品當自己的產物——
+  不報錯，資料是錯的。**這是靜默失效，不是浪費資源。**
+
+- **後處理不可以寫死 repo 內的 `.venv`。** 乾淨 clone 沒有那個目錄。
+  時序最糟：ASR 已跑完、雲端的錢已花掉、SRT 也產出來了，才死在後處理。
+
+- **`sed -i ''` 是 BSD 專屬語法**，GNU sed 會把 `''` 當檔名並 exit 2。改 `-i.bak`。
+
+### 調整
+
+- `SSH_COMMAND_TIMEOUT_SECONDS` 900 → **1800**。實測同一段遠端安裝指令，
+  快的機器 19 秒、慢的機器 7 分 30 秒（差 20 倍，差在那台機器連套件庫的網速）。
+- `SSH_READY_TIMEOUT_SECONDS` 180 → **420**。直連端口約一半機率生不出來是已知的，
+  但生得出來的實測有等到 3.7 分鐘的；180 秒會把好機器誤判成壞的砍掉重開。
+- `COST_CAP_USD` 註明是**步驟之間才檢查的軟上限**，單一步驟跑再久都不會被它中斷。
+
+### 新增
+
+- **`scripts/runpod_reap.sh`** — 獨立的收屍工具。`cloud_asr.sh` 的 trap 能處理正常結束、
+  逾時、Ctrl-C、SIGTERM，但 **`kill -9` 攔不住**——那是作業系統的硬規定。
+  關掉終端機視窗、當機、斷電都一樣，機器會留在雲端一直計費而且不會有人通知你。
+  用法：`runpod_reap.sh --kill-older-than 30`。
+
+- **`scripts/asr_capacity_check`** — 判斷這台機器跑不跑得動本地模型，
+  分模型給答案並附兩條路的代價。權重大小**讀實際檔案不用常數**
+  （優先本機 HF 快取，其次 HF API），輸出標明來源。
+  8 GB 的 M1 實測：Metal 工作集上限 5.33 GiB、VibeVoice 權重 5.32 GiB——
+  差 0.01，所以「8 GB 跑不動 VibeVoice」是結構性的，不是保守估計。
+
+- **`scripts/asr_engine.sh`** — 逐步驟的引擎解析，優先序 CLI > 各步驟環境變數 >
+  全域 > mlx。
+
+- **`docs/CLOUD-ASR-SETUP.md`** — 沒有 Apple Silicon 也能跑的從零安裝文件。
+  每一條都在真機執行過，含「沒有驗證過的部分」專節。
+
+- **`scripts/tests/test_bash32_compat.py`** — bash 3.2 相容回歸測試，四類：
+  靜默出錯（`$EPOCHSECONDS` 展開成空、算術當 0，計時器全錯且不報錯）、
+  執行才炸、解析就炸、GNU 專屬指令。含規則自體檢（25 個該抓到 + 11 個不可誤判樣本）。
+
+### 實測數字
+
+| 機器 | Breeze 速度 | 109 分鐘影片 | 花費 |
+|---|---|---|---|
+| M1 Max 32GB（本地） | 17 倍 | 約 6.5 分鐘 | 電費 |
+| M1 基本款 8GB（本地） | 3.5 倍 | 約 31 分鐘 | 電費 |
+| RunPod RTX 4090（雲端） | 40 倍 | **13.4 分鐘** | **US$0.17** |
+
+**8 GB 的機器上雲端比本地快 2.3 倍。**
+
+無 MLX 機器跑完 109 分鐘影片**的 Breeze 那一段**：2510 條字幕、涵蓋 00:00:05 到
+01:49:49（影片全長 1:49:49）、超過 30 秒的斷層 0 處、pod 砍乾淨。
+同一台也跑完 Step 2a 預處理與 Step 2b 切段（2510→2525 條、13 段）。
+Step 2b 的 LLM 校正與 Step 2c 在別台執行——那兩步是純雲端 LLM，與 ASR 主機無關。
+
+與本地輸出比對：96.5% 逐字相同，671 處差異中位數 1 個字、82% 只差 1-2 字。
+
+### Known issues
+
+- ⚠️ **VibeVoice 仍未上雲。** `cloud_asr.sh` 完全沒有 VibeVoice 的實作。
+  走 `--engine=runpod` 時 Step 1' 會跳過，Step 2b 因此少了交叉參考（`vv_segments: 0`）。
+- ⚠️ **`scripts/asr_engine.sh` 目前沒有任何腳本使用。** 它實作了逐步驟的引擎解析
+  （`SRT_BREEZE_ENGINE` / `SRT_VV_ENGINE` / `SRT_FALLBACK_ENGINE`），單元行為驗過，
+  但還沒接進 `subtitle.sh` 與 `hallucination_fallback.sh`——**那些環境變數現在設了不會生效**。
+  在 VibeVoice 有雲端路徑之前，逐步驟選引擎也沒有實際用途。
+- ⚠️ **`hallucination_fallback.sh`（Whisper large-v3 那條）仍綁 MLX**，
+  雲端模式下會明確拒絕而不是默默跑。
+- ⚠️ **雲端輸出與本地不等價，仍不知道哪邊比較對。** 需要對真人聽打比對。
+- ⚠️ **原生 Windows 與 Linux 都沒實測過。** 腳本是 bash 寫的，Windows 建議走 WSL2。
+- ⚠️ **`kill -9` 之後機器不會被砍**，這是硬極限，靠 `runpod_reap.sh` 兜底。
+- ⚠️ **wav 檔名衝突未修**（沿自 1.7.0）。
+
 ## 1.7.0 - 2026-08-30
 
 ### 新增
