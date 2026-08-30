@@ -4,9 +4,12 @@
 #
 # ASR 引擎：預設本地 mlx；設 SRT_ASR_ENGINE=runpod 走雲端 RTX 4090。
 #
-# 已知前置證據：
-# 雲端 Systran/faster-whisper-large-v3 的逐字時間戳與本地 MLX 逐字相同
-# （正常段 95 個字裡 89 個到毫秒一致、其餘 6 個差 0.02 秒）。
+# 已知前置證據（2026-08-30 live 實測更新，n=1 clip）：
+# 正常語音段：雲端 Systran/faster-whisper-large-v3 與本地 MLX 帶同一個 prompt，
+#   六條輸出文字 0 字元差、時間戳 0.00 秒差（位元組級相同）。
+# 前一個模型已幻覺的音訊段：本地 MLX 會丟掉約 30 秒的窗口，雲端 ct2 不丟。
+#   這是「不丟窗口」不是「辨識更準」——同一段音訊本地補回 4 條、雲端補回 11 條，
+#   差的是本地整段沒吐出來，不是兩邊認得的字不同。
 # 範例：hallucination_fallback.sh final.srt video.mp4 00:55:33 00:56:07
 #
 # 流程：截取音檔 → Whisper large-v3 重跑 → 時間偏移 → patch 回 SRT

@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.10.0 - 2026-08-30
+
+> **四條 ASR 路徑全部上雲，四條全部 live 驗證通過。**
+> 沒有 Apple Silicon 的機器現在可以跑完整支字幕。
+
+### 新增
+
+- **第四條路：`hallucination_fallback.sh` 的 large-v3 雲端模式。**
+  `SRT_ASR_ENGINE=runpod` 走 `Systran/faster-whisper-large-v3`（CT2 FP16、`word_timestamps`），
+  新旗標 `--initial-prompt` 把提示詞一路傳到 `model.transcribe()`，並把送出的原文落 `env/prompt_sent.txt`。
+  原本第 940 行那個「雲端不支援提示詞」的擋路判斷拿掉了——**那是我們沒接，不是模型不支援。**
+
+- **付費前置條件的參數守衛。** 引擎與旗標的組合用錯時，在**開機器之前**就退出。
+  五個負向組合各自有測試，斷言的不只是「有沒有報錯」，是 **`pod_attempts.txt` 裡有沒有 create 行**——
+  報錯可能是「開了機器才失敗」，開機 0 次才證明沒花到錢。
+
+### 修復
+
+- **雲端重試的證據會被下一次呼叫蓋掉。** 每次呼叫改用獨立目錄
+  `<work>/.cloud_asr_runs/call-NNN.xxxx/`，SRT／JSON／log／env／`pod_attempts.txt` 各自保留。
+  本地 mlx 模式不建目錄、指令路徑一個字沒動。
+  **狀態**：目錄版面 live 驗過；「第二次呼叫不撞第一次」只有 mock 驗過——
+  live 那跑第一級 buffer 就修好了，第二次呼叫沒走到。
+
+### 實測發現（n=1 clip，`company/_shared/collab/.../bench/largev3-live-20260830/`）
+
+- **正常語音段：雲端與本地位元組級相同。** 六條輸出 0 字元差、時間戳 0.00 秒差。
+- **前一個模型已幻覺的音訊段：本地 MLX 丟掉約 30 秒的窗口，雲端 ct2 不丟。**
+  同一段 30 秒（Breeze 產出「賣」×110）：本地主路徑三級 buffer 全敗、本地 fallback 只補回 4 條，
+  雲端第一級 buffer 就修好、補回 13 條。
+  **這是「不丟窗口」不是「辨識更準」**——差別在本地整段沒吐出來，不是兩邊認得的字不同。
+- 三台機器、367 計費秒、US$0.077，全部 `attempt=1`、全部 terminate success。
+
+### 已知未修（`OPEN-ITEMS.md`）
+
+- fixer 印的「插入 N 條」是 ASR 片段總條數，不是真的接進成品的條數（實測 16 vs 13）。
+- fixer 的 `patch_entries` 沒有 `hallucination_fallback.sh` 那種 clamp，
+  補丁邊界會有 0.72 秒交錯與一次詞重複。本地雲端都一樣。
+- 外層 `SRT_ASR_TIMEOUT_SECONDS` 2400 秒 < 內層最壞 4020 秒，合法的慢跑會在 40 分鐘被砍
+  （靠 SIGTERM 兜底不漏財，是刻意的取捨）。
+- `to_srt()` 與 `hallucination_fallback.sh` 兩邊都沒有 OpenCC，輸出會有簡體殘留。
+
 ## 1.9.2 - 2026-08-30
 
 > **第三條 ASR 路徑（Step 1.5 幻覺修復）的雲端路徑首次 live 驗證通過。**

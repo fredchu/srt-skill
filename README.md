@@ -40,6 +40,7 @@ Design highlights:
 - **Self-growing glossary** — each run diffs corrections and proposes new terminology rules.
 - **Noun verification pass** — correction subagents flag proper nouns that contradict their context (sidecar JSON, hash-bound to the corrected output); a post-merge pass verifies them through four evidence layers (whole-transcript phonetic cross-reference first, local sources, neutral web search with the guess barred from queries, else report-only) and applies fixes with timestamp-scoped replacement — never whole-file substitution. Confirmed mappings feed back into the glossary.
 - **Fullwidth punctuation normalization** — a deterministic Step 2c pass converts half-width commas/question/exclamation marks in CJK context to fullwidth (protecting thousands separators, decimals, and times) instead of relying on the LLM to remember.
+- **All four ASR paths can run in the cloud** — main ASR, VibeVoice, Step 1.5 hallucination repair, and the large-v3 fallback all honor `SRT_ASR_ENGINE=runpod`, renting an RTX 4090 billed by the second and terminating when done. **A machine without Apple Silicon can produce a full episode.**
 - **Context-frugal** — segmentation/prompt assembly happen on disk; subagents read their own files so the main agent's context stays small.
 
 ### Platform & requirements
@@ -75,7 +76,22 @@ All user-specific paths default to `$HOME` conventions and can be overridden wit
 | `SRT_DATA_DIR` | `$HOME/Documents/For_Claude/scripts/subtitle` | private glossary + media output (kept out of this repo) |
 | `SRT_TERMS` | `$SRT_DATA_DIR/srt_correct/terms_austin_v2.txt` | your terminology file |
 | `SRT_VV_SCRIPT` | `$HOME/dev/vibevoice-poc/vibevoice_asr.py` | the optional VibeVoice ASR script |
-| `SRT_ASR_ENGINE` | `mlx` | ASR backend: `mlx` (local Apple Silicon) or `runpod` (cloud RTX 4090). Also settable per-run with `--engine=`. **Default stays local on purpose** — cloud output is not equivalent to local (see Known issues) |
+| `SRT_ASR_ENGINE` | `mlx` | ASR backend: `mlx` (local Apple Silicon) or `runpod` (cloud RTX 4090). Also settable per-run with `--engine=`. All four ASR paths support cloud, so **a machine without Apple Silicon can run a full episode**. **Default stays local on purpose** — see "Cloud ASR" below |
+
+### Cloud ASR
+
+Set `SRT_ASR_ENGINE=runpod` to send ASR to an RTX 4090 on RunPod, billed by the second and terminated automatically. **The default stays local on purpose**: cloud runs cost real money, local runs do not.
+
+Measured on a 109-minute episode: **US$0.17**. Setup and credentials: **[docs/CLOUD-ASR-SETUP.md](docs/CLOUD-ASR-SETUP.md)**.
+
+**The two sides are not guaranteed to match** (measured 2026-08-30, n=1 clip):
+
+| Audio | Result |
+|---|---|
+| Normal speech | Byte-identical (six outputs, 0 character difference, 0.00 s timestamp difference) |
+| A span the previous model already hallucinated on | **Local MLX drops a ~30-second window; the cloud does not** |
+
+The second row is "does not drop the window", not "more accurate" — on the same 30 seconds, local recovered 4 entries and the cloud recovered 13. The gap is that local never emitted the span, not that the two disagree about the words.
 
 ### Bring your own glossary
 
@@ -128,6 +144,7 @@ YouTube 連結 或 本地影片／音檔
 - **會自我成長的術語表** — 每次跑完 diff 校正結果，提出新術語規則。
 - **名詞查證 pass** — 校正 subagent 把「與上下文矛盾的專有名詞」寫進 sidecar（以 SHA-256 綁定該段校正產物防殘留）；合併後主流程走四層查證（全文音近變體交叉比對優先、本地資源、中性網路搜尋且禁止把猜測放進 query、查不動就只進報告），修正以時間戳定位逐處套用、絕不全檔取代，確認的對應會回寫術語表。
 - **全形標點正規化** — Step 2c 後處理確定性把中文語境的半形逗號／問號／驚嘆號轉全形（保護數字千分位、小數點、時間），不依賴 LLM 每次記得用全形。
+- **四條 ASR 路徑都能上雲** — 主 ASR、VibeVoice、Step 1.5 幻覺修復、large-v3 fallback 全部支援 `SRT_ASR_ENGINE=runpod`，租用 RTX 4090 按秒計費、跑完自動關機。**沒有 Apple Silicon 的機器可以跑完整支字幕。**
 - **節約 context** — 切分／prompt 組裝都在 disk 上完成，subagent 自己讀檔，主 agent context 維持精簡。
 
 ### 平台與需求
@@ -163,7 +180,24 @@ git clone <repo-url> ~/.claude/skills/srt
 | `SRT_DATA_DIR` | `$HOME/Documents/For_Claude/scripts/subtitle` | 私人術語表 + media 產物（不進此 repo） |
 | `SRT_TERMS` | `$SRT_DATA_DIR/srt_correct/terms_austin_v2.txt` | 你的術語檔 |
 | `SRT_VV_SCRIPT` | `$HOME/dev/vibevoice-poc/vibevoice_asr.py` | 選用的 VibeVoice ASR 腳本 |
-| `SRT_ASR_ENGINE` | `mlx` | ASR 引擎：`mlx`（本地 Apple Silicon）或 `runpod`（雲端 RTX 4090）。也可用 `--engine=` 逐次指定。**預設維持本地是刻意的**——雲端輸出與本地不等價，見 Known issues |
+| `SRT_ASR_ENGINE` | `mlx` | ASR 引擎：`mlx`（本地 Apple Silicon）或 `runpod`（雲端 RTX 4090）。也可用 `--engine=` 逐次指定。四條 ASR 路徑都支援雲端，**沒有 Apple Silicon 也能跑完整支**。**預設維持本地是刻意的**——見下方「雲端 ASR」 |
+
+### 雲端 ASR
+
+設 `SRT_ASR_ENGINE=runpod` 就會把 ASR 送到 RunPod 的 RTX 4090 跑，按秒計費、跑完自動關機。
+**預設維持本地是刻意的**：雲端會產生實際費用，而本地免費。
+
+實測一支 109 分鐘的影片：**US$0.17**。安裝與憑證設定見 **[docs/CLOUD-ASR-SETUP.md](docs/CLOUD-ASR-SETUP.md)**。
+
+**兩側輸出不保證相同**（2026-08-30 實測，n=1 clip）：
+
+| 音訊類型 | 結果 |
+|---|---|
+| 正常語音 | 位元組級相同（六條輸出 0 字元差、時間戳 0.00 秒差） |
+| 前一個模型已幻覺的段落 | **本地 MLX 會丟掉約 30 秒的窗口，雲端不丟** |
+
+第二列是「不丟窗口」不是「辨識更準」——同一段 30 秒音訊，本地補回 4 條、雲端補回 13 條，
+差別在本地整段沒吐出來，不是兩邊認得的字不同。
 
 ### 自備術語表
 
