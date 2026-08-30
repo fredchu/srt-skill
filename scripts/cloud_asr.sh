@@ -151,9 +151,36 @@ maybe_timeout() {
     shift
     if [[ -n "$TIMEOUT_BIN" ]]; then
         "$TIMEOUT_BIN" "$limit" "$@"
-    else
-        "$@"
+        return $?
     fi
+    # coreutils 未安裝時的純 bash 替代（乾淨的 macOS 沒有 timeout 也沒有 gtimeout）。
+    # 不可以裸跑命令：這四個呼叫點全是 ssh/scp，卡住時不會產生任何訊號，
+    # 於是 `trap cleanup EXIT INT TERM HUP QUIT` 永遠不觸發，pod 會一直計費。
+    # 逾時一律回 124，與 coreutils timeout 一致（第 1023 行有檢查這個值）。
+    #
+    # `<&0` 不可省略：非互動 shell 的背景工作預設把 stdin 接到 /dev/null。
+    # 實測（2026-08-30）不加就會讓 `ssh 'bash -se' <"$script_file"` 讀到空輸入，
+    # 遠端靜默不做事而且不報錯。
+    local fired="${TMPDIR:-/tmp}/cloud_asr_mt_$$_${RANDOM}.fired"
+    rm -f "$fired"
+    "$@" <&0 &
+    local cmd_pid=$!
+    (
+        sleep "$limit"
+        kill -0 "$cmd_pid" 2>/dev/null || exit 0
+        : > "$fired"
+        kill -TERM "$cmd_pid" 2>/dev/null
+        sleep 3
+        kill -KILL "$cmd_pid" 2>/dev/null
+    ) &
+    local watchdog_pid=$!
+    local rc=0
+    wait "$cmd_pid" || rc=$?
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    if [[ -e "$fired" ]]; then rc=124; fi
+    rm -f "$fired"
+    return "$rc"
 }
 
 mock_read_file() {
