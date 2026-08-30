@@ -9,7 +9,7 @@ srt_hallucination_fix.py — ASR 幻覺偵測 + 自動修復
 偵測到後自動截取音檔片段、用 Breeze ASR 重跑、patch 回 SRT。
 
 用法:
-    python3 srt_hallucination_fix.py <SRT> <音檔或影片> [--breeze] [--output <path>] [--gap-threshold 10]
+    python3 srt_hallucination_fix.py <SRT> <音檔或影片> [--breeze] [--output <path>] [--gap-threshold 10] [--max-anomalies N]
 
 不加 --output 就直接覆寫原 SRT。
 """
@@ -169,11 +169,14 @@ def find_anomalies(entries, gap_threshold_s=None):
 #
 # 0 或未設＝不限制（本地路徑不花錢，沒必要擋）。
 _ASR_CALLS = 0
+_ASR_HARD_STOP = False
 
 
 def run_asr(wav_path, output_dir, use_breeze=True):
     """執行 ASR，回傳產出的 SRT 路徑。"""
-    global _ASR_CALLS
+    global _ASR_CALLS, _ASR_HARD_STOP
+    if _ASR_HARD_STOP:
+        return None
     max_calls = int(os.environ.get('SRT_ASR_MAX_CALLS', '0'))
     _ASR_CALLS += 1
     if max_calls and _ASR_CALLS > max_calls:
@@ -216,6 +219,19 @@ def run_asr(wav_path, output_dir, use_breeze=True):
             stdout, stderr = proc.communicate()
         return None
 
+    # 把子程序的輸出落檔。Popen 捕捉之後如果只留在記憶體，
+    # 「這次到底走了哪條引擎」就無從事後查證——雲端模式下那是唯一的證據。
+    # （2026-08-30 pi 指出：成功時的 stdout 被丟棄，驗收要的
+    #  「引擎：runpod」與「normalizing」字串不會出現在任何檔案裡。）
+    try:
+        log_path = os.path.join(output_dir, '_asr_call.log')
+        with open(log_path, 'a', encoding='utf-8') as fh:
+            fh.write(f"\n===== ASR call #{_ASR_CALLS} : {os.path.basename(wav_path)} =====\n")
+            fh.write(stdout or '')
+            fh.write(stderr or '')
+    except OSError:
+        pass
+
     class _R:
         pass
     result = _R()
@@ -224,6 +240,17 @@ def run_asr(wav_path, output_dir, use_breeze=True):
     result.stderr = stderr
     if result.returncode != 0:
         print(f"  ❌ ASR 失敗: {result.stderr[-200:]}", file=sys.stderr)
+        # 雲端模式下「失敗就停整支」，不是只跳過這一段。
+        #
+        # 原本失敗只 break 內層 buffer 迴圈，外層會走到下一個異常段**再開一台機器**。
+        # 所以「第一台失敗就停」在雲端模式下**根本不成立**——
+        # 它會一路開到總量熔斷為止。（2026-08-30 pi 在派工前抓到，沒花到錢。）
+        #
+        # 本地模式不停：本地失敗不花錢，繼續試下一段是對的。
+        if os.environ.get('SRT_ASR_ENGINE') == 'runpod':
+            print("  🛑 雲端模式：第一次 ASR 失敗即停止整支，避免對下一段再開機器。",
+                  file=sys.stderr)
+            _ASR_HARD_STOP = True
         return None
 
     # 找產出的 SRT
@@ -309,6 +336,11 @@ def main():
         elif args[i] == '--gap-threshold' and i + 1 < len(args):
             gap_threshold = float(args[i + 1])
             i += 2
+        elif args[i] == '--max-anomalies' and i + 1 < len(args):
+            # 只處理前 N 個異常段。雲端模式下每段都是一台新機器，
+            # 所以「先驗一段」是控制花費的正當做法，不是偷懶。
+            os.environ['SRT_MAX_ANOMALIES'] = args[i + 1]
+            i += 2
         else:
             positional.append(args[i])
             i += 1
@@ -352,6 +384,12 @@ def main():
     # 逐一修復
     fixed = 0
     work_dir = os.path.dirname(srt_path)
+
+    _cap = int(os.environ.get('SRT_MAX_ANOMALIES', '0'))
+    if _cap and len(anomalies) > _cap:
+        print(f"  ⚠️ 偵測到 {len(anomalies)} 個異常段，依 --max-anomalies 只處理前 {_cap} 個",
+              file=sys.stderr)
+        anomalies = anomalies[:_cap]
 
     for ai, anomaly in enumerate(anomalies):
         print(f"\n修復 {ai+1}/{len(anomalies)}: {ms_to_ts(anomaly['start_ms'])} → {ms_to_ts(anomaly['end_ms'])}",
