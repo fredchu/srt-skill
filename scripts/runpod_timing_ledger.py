@@ -148,22 +148,40 @@ def save(rows: dict) -> None:
     LEDGER.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# 等多久之後才算「真的等過了」。超過這個秒數仍沒就緒，才當成強證據；
+# 低於它的逾時只是「我們在那裡放棄了」。目前的逾時上限是 420，
+# 所以 480 以上才算我們真的多等過。
+CENSOR_THRESHOLD = 480
+
+
 def stats(rows: dict) -> None:
     ok = sorted(el for _, res, el in rows.values() if res == "ready")
-    bad = sorted(el for _, res, el in rows.values() if res != "ready")
+    stopped = sorted(el for _, res, el in rows.values() if res != "ready" and el < CENSOR_THRESHOLD)
+    waited = sorted(el for _, res, el in rows.values() if res != "ready" and el >= CENSOR_THRESHOLD)
+
     print(f"帳本：{LEDGER}")
-    print(f"  成功 {len(ok)} 筆、失敗 {len(bad)} 筆")
+    print(f"  成功 {len(ok)} 筆、沒就緒 {len(stopped) + len(waited)} 筆")
     if ok:
-        print(f"  成功的等待秒數：{ok}")
-        print(f"  最慢成功 {max(ok)} 秒" + (f"、中位數 {statistics.median(ok):.0f} 秒" if len(ok) > 1 else ""))
-    if bad:
-        print(f"  失敗時已等：{bad}")
+        print(f"  ✅ 成功的等待秒數：{ok}")
+        print(f"     最慢 {max(ok)} 秒" + (f"、中位數 {statistics.median(ok):.0f} 秒" if len(ok) > 1 else ""))
+    print()
+    print("  ⚠️ 沒就緒的那些要分兩類讀，混在一起會推出錯的結論：")
+    if stopped:
+        print(f"     【我們放棄了】{stopped}")
+        print(f"       這些**不是**「那台在該秒數確定失敗」，是「我們在該秒數不等了」。")
+        print(f"       所以**不能**拿最小值去說「谷底在 X 與 Y 之間」——右設限樣本。")
+    if waited:
+        print(f"     【真的等很久仍沒有】{waited}")
+        print(f"       這些才是強證據。")
+
     if ok:
         cur = 420
         print()
-        print(f"  目前逾時 {cur} 秒 = 最慢成功的 {cur / max(ok):.1f} 倍")
+        print(f"  目前逾時 {cur} 秒 = 最慢成功（{max(ok)} 秒）的 {cur / max(ok):.1f} 倍")
         if len(ok) < 20:
             print(f"  ⚠️ 成功樣本只有 {len(ok)} 筆，**還不足以調整逾時**（門檻 20 筆）")
+            print(f"     維持 420 的理由是「資料無法證明更短是安全的」，")
+            print(f"     **不是**「已經證明更短不安全」——這兩句話不一樣。")
         else:
             print(f"  ✅ 樣本 {len(ok)} 筆已達門檻，可以重新評估逾時值")
 
