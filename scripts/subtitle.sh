@@ -195,12 +195,23 @@ TOTAL_START=$SECONDS
 print_step 1 "檢查依賴工具"
 
 check_dependency ffmpeg
-check_dependency mlx_whisper
+
+# 依賴要跟著引擎走。無條件檢查 mlx_whisper 會讓沒有 MLX 的機器
+# 在還沒走到雲端那條路之前就死掉——引擎分流加在執行點，檢查點也必須跟上。
+# （2026-08-30 在 Mini CC / M1 8GB 無 MLX 實測撞到，那時 --engine=runpod 完全跑不起來。）
+if [ "$ASR_ENGINE" = "runpod" ]; then
+    for dep in curl ssh scp python3; do
+        check_dependency "$dep"
+    done
+else
+    check_dependency mlx_whisper
+fi
+
 if [ "$SKIP_OPENCC" = false ]; then
     check_dependency opencc
 fi
 
-print_success "所有依賴已就緒"
+print_success "所有依賴已就緒（引擎：${ASR_ENGINE}）"
 
 if [ "$USE_TURBO" = true ]; then
     print_warning "使用 turbo 模型（較快但中文品質略差）"
