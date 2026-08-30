@@ -108,6 +108,10 @@ strict_srt_count() {
 
 # ---------- 參數解析 ----------
 INPUT_FILE=""
+# ASR 引擎：mlx（預設，本地 Apple Silicon）或 runpod（雲端 RTX 4090）
+# 預設維持 mlx 是刻意的——雲端輸出與本地不等價（跨側差 2.07%，兩邊自噪皆 0），
+# 詳見 company/_shared/collab/20260829-srt-cloud-asr-runpod/FINAL-srt-cloud-asr-plan.md
+ASR_ENGINE="${SRT_ASR_ENGINE:-mlx}"
 USE_BREEZE=false
 USE_TURBO=false
 KEEP_WAV=false
@@ -124,6 +128,13 @@ for arg in "$@"; do
         --turbo)
             USE_TURBO=true
             MODEL="mlx-community/whisper-large-v3-turbo"
+            ;;
+        --engine)
+            print_error "--engine 需要用 --engine=<mlx|runpod> 的形式"
+            exit 1
+            ;;
+        --engine=*)
+            ASR_ENGINE="${arg#*=}"
             ;;
         --keep-wav)
             KEEP_WAV=true
@@ -148,6 +159,14 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# 引擎值統一在此驗一次（旗標與環境變數兩條路都要過）。
+# 只在旗標那邊驗會漏掉 SRT_ASR_ENGINE=bogus——那會靜默降級成 mlx，
+# 使用者以為上雲了其實在本地跑。這是「靜默失效」家族。
+case "${ASR_ENGINE}" in
+    mlx|runpod) ;;
+    *) print_error "未知引擎：${ASR_ENGINE}（可用 mlx 或 runpod；也可用 SRT_ASR_ENGINE 環境變數設定）"; exit 1 ;;
+esac
 
 if [ -z "$INPUT_FILE" ]; then
     print_error "請指定輸入檔案"
@@ -249,7 +268,22 @@ fi
 MLX_MARKER="$(mktemp -t mlx_marker.XXXXXX)"
 MLX_STDOUT_LOG="$(mktemp -t mlx_stdout.XXXXXX)"
 set +e
-mlx_whisper "${MLX_WHISPER_ARGS[@]}" "$WAV_FILE" 2>&1 | tee "$MLX_STDOUT_LOG"
+if [ "$ASR_ENGINE" = "runpod" ]; then
+    # 雲端分流。cloud_asr.sh 是 drop-in 替代品：同樣的 wav 進去、
+    # 同樣的 ${DIR}/${BASENAME}.srt 出來，所以底下的檔名 fallback 與
+    # strict 驗證完全不用改。憑證走環境變數 RUNPOD_API_KEY，不落檔。
+    ENGINE_FLAG=""
+    [ "$USE_BREEZE" = true ] && ENGINE_FLAG="--breeze"
+    [ "$USE_TURBO" = true ] && ENGINE_FLAG="--turbo"
+    CLOUD_ASR="$(dirname "${BASH_SOURCE[0]}")/cloud_asr.sh"
+    if [ ! -x "$CLOUD_ASR" ]; then
+        print_error "找不到可執行的 cloud_asr.sh：$CLOUD_ASR"
+        rm -f "$MLX_MARKER"; exit 1
+    fi
+    "$CLOUD_ASR" "$WAV_FILE" "$DIR" "$BASENAME" "$LANGUAGE" $ENGINE_FLAG 2>&1 | tee "$MLX_STDOUT_LOG"
+else
+    mlx_whisper "${MLX_WHISPER_ARGS[@]}" "$WAV_FILE" 2>&1 | tee "$MLX_STDOUT_LOG"
+fi
 mlx_status=${PIPESTATUS[0]}
 set -e
 
@@ -273,7 +307,9 @@ if [ ! -f "$MLX_OUTPUT" ]; then
 fi
 
 MLX_FALLBACK_USED=false
-if [ "$(strict_srt_count "$MLX_OUTPUT")" -eq 0 ]; then
+if [ "$(strict_srt_count "$MLX_OUTPUT")" -eq 0 ] && [ "$ASR_ENGINE" = "mlx" ]; then
+    # 這條重建路徑只認 mlx_whisper 的 verbose 格式，雲端 stdout 餵進去沒有意義，
+    # 而且會印出誤導的錯誤訊息（雲端失敗卻報 mlx_whisper KeyError）。
     MLX_FALLBACK_USED=true
     print_warning "Whisper SRT 缺失或沒有有效時間軸，疑似 mlx_whisper KeyError:'words'；嘗試從 verbose stdout 重建。log: $MLX_STDOUT_LOG"
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -281,7 +317,11 @@ if [ "$(strict_srt_count "$MLX_OUTPUT")" -eq 0 ]; then
 fi
 
 if [ "$(strict_srt_count "$MLX_OUTPUT")" -eq 0 ]; then
-    print_error "Whisper 未產生有效 SRT（mlx exit=$mlx_status）；已保留 stdout log: $MLX_STDOUT_LOG"
+    if [ "$ASR_ENGINE" = "runpod" ]; then
+        print_error "雲端 ASR 未產生有效 SRT（cloud_asr.sh exit=${mlx_status}）；已保留 log: $MLX_STDOUT_LOG"
+    else
+        print_error "Whisper 未產生有效 SRT（mlx exit=${mlx_status}）；已保留 stdout log: $MLX_STDOUT_LOG"
+    fi
     rm -f "$MLX_MARKER"
     exit 1
 fi

@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.6.1
+version: 1.7.0
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -102,6 +102,10 @@ ${SUBTITLE_DIR}/
 
 其他參數：
 - **ASR 模式**：預設 Breeze（`--breeze`）。用戶提到 whisper / 英文內容 / 非中文 → 用 Whisper（不加 `--breeze`）
+- **ASR 引擎**：**預設 `mlx`（本地 Apple Silicon）**。用戶提到「用 runpod」「跑雲端」「M1 Max 不在」→ `--engine=runpod`
+  （也可用 `SRT_ASR_ENGINE` 環境變數）。⚠️ **雲端只支援 `--breeze`**，其餘配置 `cloud_asr.sh` 會直接報錯。
+  ⚠️ **雲端輸出與本地不等價**：跨側文字差 2.07%，而兩邊各自跑兩次都逐位元組相同——
+  差異是穩定的實質差異不是雜訊，且**不知道哪邊比較對**。要用雲端請先確認用戶知道這件事。
 - **術語表**：預設 `terms_austin_v2.txt`。用戶指定其他講者 → 尋找對應術語表
 - **投影片文字**：用戶提供投影片檔（.txt 純文字，或 .pptx/.ppt PowerPoint）→ 啟用 Step 0.5 抽取本集術語
 - **特殊要求**：`--learn`（術語學習）、`--bilingual`（雙語輸出）

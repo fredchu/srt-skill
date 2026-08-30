@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.7.0 - 2026-08-30
+
+### 新增
+
+- **可選的雲端 ASR 路徑**：`subtitle.sh --engine=runpod`（或 `SRT_ASR_ENGINE=runpod`）
+  把 Step 1 的 ASR 送到 RunPod RTX 4090 跑。**預設維持 `mlx`（本地）不變。**
+
+  目的是降低本地硬體需求——M1 Max 故障備援、8GB 的 MBA、非 Apple Silicon 的機器。
+  實測（49 分鐘影片）：Breeze 走 faster-whisper RTF 0.0253，比本地 M1 Max 快 2.3 倍；
+  一集約新台幣 5 元。完整實測見
+  `company/_shared/collab/20260829-srt-cloud-asr-runpod/FINAL-srt-cloud-asr-plan.md`。
+
+  分流只有一處（`subtitle.sh` 呼叫 ASR 那一行），輸出寫到同一個路徑，
+  所以檔名 fallback、strict 驗證、後處理全部不變；
+  `srt_hallucination_fix.py` 因為呼叫的就是 `subtitle.sh`，**自動獲得雲端能力**。
+
+### Known issues
+
+- ⚠️ **雲端輸出與本地不等價，而且不知道哪邊比較對。**
+  跨側文字差 2.07%（Breeze）、20.5%（VibeVoice），而兩邊各自跑兩次都逐位元組相同——
+  差異是穩定的實質差異，不是雜訊。要判斷哪邊正確需要對真人聽打比對，尚未做。
+- ⚠️ **雲端只支援 `--breeze`。** 不帶旗標（large-v3 全片）與 `--turbo` 都沒在雲端測過，
+  `cloud_asr.sh` 對這兩種會直接報錯而不是默默跑。
+- ⚠️ **VibeVoice 尚未上雲。** 本版只搬 Step 1 的 Breeze。
+- ⚠️ **Step 1.5 的幻覺修復在雲端未驗證。** 主路徑呼叫 `subtitle.sh` 所以理論上跟著上雲，
+  但沒實跑過；第二順位的 `hallucination_fallback.sh` 仍綁 MLX。
+- ⚠️ **wav 檔名衝突未修**：`subtitle.sh` 與 `vibevoice_asr.py` 仍搶同一個
+  `<影片檔名>.wav`，靠「先跑完 Breeze 再啟動 VV」的紀律緩解。本版未處理。
+
 ## 1.6.1 - 2026-08-29
 
 ### 修復
