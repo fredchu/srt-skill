@@ -15,6 +15,25 @@ RUNPOD_ESTIMATED_RATE_PER_HR="${RUNPOD_ESTIMATED_RATE_PER_HR:-0.751}"
 # 所以實際花費最多會超出上限「一個步驟」的量。
 # SSH_COMMAND_TIMEOUT 放寬到 1800 秒之後，最壞情況是超出約 0.37 美元
 # （1800 秒 × 0.751/小時）。要真正封頂請同時調低 SSH_COMMAND_TIMEOUT_SECONDS。
+# 只租 CUDA 驅動 12.8 以上的主機。
+#
+# 2026-08-30 觀察：直連 SSH 埠不生成的問題，在 CUDA 12.4 的主機上三台全敗
+# （a1/a2/a3，各等 425-431 秒仍為 null），而 12.8 與 13.0 各一台都成功
+# （26 秒與 222 秒）。三台都在 US-NC-1，昨天成功那台也在 US-NC-1，
+# **所以不是資料中心的問題，是 12.4 那批主機。**
+#
+# n 只有 2 對 3，是線索不是定論，但它是目前唯一能解釋
+# 「同一個資料中心，有的 26 秒好、有的永遠不來」的變數。
+#
+# 用 minCudaVersion（數值比較）不用 allowedCudaVersions（精確比對）：
+# openapi.json 寫明 allowed 是精確比對，**列了沒有機器提供的版本會直接回
+# 容量錯誤而不是自動退回**。用 min 就不會把 13.0 / 13.2 那批誤排掉。
+# 4090 目前 available 的版本：12.4、12.8、13.0、13.2
+# （GET /v2/catalog/gpus?include=AVAILABILITY&product=POD 查的）。
+#
+# 設成空字串就不加這個約束（回到舊行為）。
+RUNPOD_MIN_CUDA="${RUNPOD_MIN_CUDA:-12.8}"
+
 COST_CAP_USD="${COST_CAP_USD:-0.5}"
 SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY:-$HOME/.ssh/id_ed25519}"
 SSH_PUBLIC_KEY_PATH="${SSH_PUBLIC_KEY_PATH:-$HOME/.ssh/id_ed25519.pub}"
@@ -299,6 +318,7 @@ validate_create_pod_payload_file() {
         and (.image | type == "string" and length > 0)
         and (.gpu.id == "NVIDIA GeForce RTX 4090")
         and (.gpu.count == 1)
+        and (.gpu.minCudaVersion | type == "string" and length > 0)
         and (.cloud == "SECURE")
         and (.disk == 60)
         and (.ports | type == "array" and length == 1 and .[0] == "22/tcp")
@@ -313,7 +333,8 @@ build_create_pod_payload() {
     jq -n \
         --arg name "$pod_name" \
         --arg image "$RUNPOD_IMAGE" \
-        '{name:$name,image:$image,gpu:{id:"NVIDIA GeForce RTX 4090",count:1},cloud:"SECURE",disk:60,ports:["22/tcp"],startSsh:true}' \
+        --arg mincuda "$RUNPOD_MIN_CUDA" \
+        '{name:$name,image:$image,gpu:{id:"NVIDIA GeForce RTX 4090",count:1,minCudaVersion:$mincuda},cloud:"SECURE",disk:60,ports:["22/tcp"],startSsh:true}' \
         >"$payload_file"
     validate_create_pod_payload_file "$payload_file"
 }
