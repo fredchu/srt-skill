@@ -399,7 +399,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "${SCRIPT_DIR}/postprocess_srt.py" ]; then
     print_step "4.5" "標點恢復 + 術語校正"
     STEP_START=$SECONDS
-    "${SCRIPT_DIR}/.venv/bin/python3" "${SCRIPT_DIR}/postprocess_srt.py" "$SRT_TW" "$SRT_TW" --no-punctuation --stats
+    # repo 裡的 .venv 是開發機的慣例，不是安裝需求。乾淨 clone 沒有它，
+    # 寫死路徑會讓整支腳本在這裡死掉——ASR 已經跑完、雲端錢也花了。
+    # （2026-08-30 在 Mini CC 實測撞到：雲端 ASR 成功產出 SRT，卻死在這一行。）
+    if [ -x "${SCRIPT_DIR}/.venv/bin/python3" ]; then
+        POST_PY="${SCRIPT_DIR}/.venv/bin/python3"
+    else
+        POST_PY="$(command -v python3 || true)"
+        if [ -z "$POST_PY" ]; then
+            print_error "找不到 python3（後處理需要）"
+            exit 1
+        fi
+    fi
+    "$POST_PY" "${SCRIPT_DIR}/postprocess_srt.py" "$SRT_TW" "$SRT_TW" --no-punctuation --stats
     STEP_ELAPSED=$((SECONDS - STEP_START))
     print_success "後處理完成（$(format_duration $STEP_ELAPSED)）"
 fi
