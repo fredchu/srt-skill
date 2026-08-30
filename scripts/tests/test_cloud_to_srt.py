@@ -28,17 +28,15 @@ def _write_json(tmp_path: Path, name: str, payload: object) -> Path:
     return path
 
 
-def test_vv_json_is_lowercase_only_and_opencc_free(tmp_path: Path) -> None:
+def test_vv_json_is_lowercase_only_and_unconditionally_s2twp(tmp_path: Path) -> None:
     source = SCRIPT.read_text(encoding="utf-8")
-    assert "from opencc" not in source.lower()
-    assert "import opencc" not in source.lower()
-    assert "OpenCC(" not in source
+    assert 'OpenCC("s2twp")' in source
 
     src = _write_json(
         tmp_path,
         "vv_raw.json",
         [
-            {"Start": 0, "End": 60, "Content": " Hello ", "Speaker": "A"},
+            {"Start": 0, "End": 60, "Content": " 汉字里面 Hello ", "Speaker": "A"},
             {"Start": 60, "End": 61, "Content": ""},
         ],
     )
@@ -49,8 +47,20 @@ def test_vv_json_is_lowercase_only_and_opencc_free(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.startswith("vv: 1 條 → ")
     assert proc.stderr == ""
-    assert json.loads(dst.read_text(encoding="utf-8")) == [{"start": 0.0, "end": 60.0, "text": "Hello"}]
+    assert json.loads(dst.read_text(encoding="utf-8")) == [{"start": 0.0, "end": 60.0, "text": "漢字裡面 Hello"}]
     assert dst.read_text(encoding="utf-8").count("Speaker") == 0
+
+
+def test_vv_s2twp_preserves_traditional_text(tmp_path: Path) -> None:
+    src = _write_json(
+        tmp_path,
+        "vv_traditional.json",
+        [{"start": 0, "end": 1, "text": "這是臺灣繁體中文"}],
+    )
+    dst = tmp_path / "vv.json"
+    proc = _run(SCRIPT, "vv", src, dst)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(dst.read_text(encoding="utf-8"))[0]["text"] == "這是臺灣繁體中文"
 
 
 @pytest.mark.parametrize(

@@ -3,7 +3,7 @@
 
 雲端 benchmark 產的是研究用的原始 JSON，下游要的是：
   Breeze / Whisper → 真正的 .srt 檔（subtitle.sh 的格式）
-  VibeVoice        → 小寫 start/end/text 的 JSON（不再做 OpenCC）
+  VibeVoice        → 小寫 start/end/text 的繁體 JSON（OpenCC s2twp）
 
 用法：
   cloud_to_srt.py breeze <雲端 json> <輸出 .srt>
@@ -59,10 +59,16 @@ def to_srt(src, dst):
 
 
 def to_vv_json(src, dst):
+    # VibeVoice varies between simplified, traditional, and mixed Chinese.
+    # Match the local production SRT path: unconditional s2twp is effectively
+    # idempotent on traditional input and makes downstream references stable.
+    from opencc import OpenCC
+
+    converter = OpenCC("s2twp")
     segs = _segments(json.load(open(src, encoding="utf-8")))
     out = []
     for seg in segs:
-        t = _text(seg)
+        t = converter.convert(_text(seg))
         if not t:
             continue
         a, b = _span(seg)

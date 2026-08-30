@@ -562,15 +562,24 @@ query_pod_record() {
     printf '%s\n' "$record"
 }
 
+get_pod_metadata() {
+    local record
+
+    record="$(query_pod_record)" || return 1
+    jq -r '[.cudaVersion // "unknown", .dataCenterId // "unknown"] | @tsv' <<<"$record" 2>/dev/null
+}
+
 get_pod_ssh_endpoint() {
-    local record ip port
+    local record ip port cuda_version data_center_id
 
     record="$(query_pod_record)"
     [[ -n "$record" ]] || return 1
     ip="$(jq -r '.ssh.direct.host // ((.runtime.ports // [])[]? | select((.type // "") == "tcp" and ((.private // .privatePort // empty | tostring) == "22")) | (.ip // empty))' <<<"$record" 2>/dev/null | head -n 1)"
     port="$(jq -r '(.ssh.direct.port // empty | tostring), ((.runtime.ports // [])[]? | select((.type // "") == "tcp" and ((.private // .privatePort // empty | tostring) == "22")) | (.public // .publicPort // empty | tostring))' <<<"$record" 2>/dev/null | grep -v '^$' | head -n 1)"
+    cuda_version="$(jq -r '.cudaVersion // "unknown"' <<<"$record" 2>/dev/null)"
+    data_center_id="$(jq -r '.dataCenterId // "unknown"' <<<"$record" 2>/dev/null)"
     if [[ -n "$ip" && -n "$port" && "$ip" != "null" && "$port" != "null" ]]; then
-        printf '%s\t%s\n' "$ip" "$port"
+        printf '%s\t%s\t%s\t%s\n' "$ip" "$port" "$cuda_version" "$data_center_id"
         return 0
     fi
     return 1
@@ -820,7 +829,7 @@ scp_download() {
 }
 
 wait_for_ssh_ready() {
-    local start now elapsed endpoint ip port probe_status
+    local start now elapsed endpoint ip port cuda_version data_center_id metadata probe_status
 
     if [[ "${CLOUD_ASR_TEST_HOOK:-}" == "signal_cleanup" ]]; then
         info "test hook: blocking before direct endpoint for pod $POD_ID"
@@ -832,18 +841,18 @@ wait_for_ssh_ready() {
     start="$(date +%s)"
     while :; do
         if endpoint="$(get_pod_ssh_endpoint)"; then
-            IFS=$'\t' read -r ip port <<<"$endpoint"
+            IFS=$'\t' read -r ip port cuda_version data_center_id <<<"$endpoint"
             if ssh_probe_ready "$ip" "$port"; then
                 POD_IP="$ip"
                 POD_PORT="$port"
-                append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=direct_wait result=ready host=${POD_IP} port=${POD_PORT}"
+                append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=direct_wait result=ready host=${POD_IP} port=${POD_PORT} cuda_version=${cuda_version:-unknown} data_center_id=${data_center_id:-unknown}"
                 info "SSH ready at root@$POD_IP -p $POD_PORT"
                 return 0
             else
                 probe_status=$?
             fi
             if [[ $probe_status -eq 42 ]]; then
-                append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=direct_wait result=auth_failure host=$ip port=$port"
+                append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=direct_wait result=auth_failure host=$ip port=$port cuda_version=${cuda_version:-unknown} data_center_id=${data_center_id:-unknown}"
                 return 42
             fi
             info "SSH endpoint present but not ready yet at root@$ip -p $port"
@@ -855,7 +864,9 @@ wait_for_ssh_ready() {
         elapsed=$((now - start))
         if (( elapsed >= SSH_READY_TIMEOUT_SECONDS )); then
             error "timed out after ${SSH_READY_TIMEOUT_SECONDS}s waiting for direct SSH on pod $POD_ID"
-            append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=direct_wait result=timeout elapsed=${elapsed}s"
+            metadata="$(get_pod_metadata 2>/dev/null || printf 'unknown\tunknown')"
+            IFS=$'\t' read -r cuda_version data_center_id <<<"$metadata"
+            append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=direct_wait result=timeout elapsed=${elapsed}s cuda_version=${cuda_version:-unknown} data_center_id=${data_center_id:-unknown}"
             return 124
         fi
         check_cost_cap
