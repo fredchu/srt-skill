@@ -347,9 +347,18 @@ runpod_rest_request() {
     local response_file stderr_file http_code curl_status body curl_err url
 
     if [[ -n "${CLOUD_ASR_TEST_HOOK:-}" ]]; then
+        local mock_rc
         mock_runpod_rest_request "$mode" "$method" "$path" "$body_file"
-        return $?
-    fi
+        mock_rc=$?
+        # 回 44 是 mock 專用的「模擬 HTTP 404」。
+        # 不直接 return，讓它跟真實路徑走同一段 404 判定——
+        # 否則測試測到的是 mock 自己，不是要驗的那段邏輯。
+        if [[ $mock_rc -eq 44 ]]; then
+            http_code=404
+        else
+            return $mock_rc
+        fi
+    else
 
     response_file="${TMP_DIR}/runpod_${method}_$$.response"
     stderr_file="${TMP_DIR}/runpod_${method}_$$.stderr"
@@ -408,6 +417,8 @@ runpod_rest_request() {
                     ;;
             esac
         fi
+    fi
+
     fi
 
     # DELETE 收到 404 代表「那台已經不在了」——那正是我們要的結果，不是失敗。
@@ -507,6 +518,17 @@ mock_runpod_rest_request() {
         "DELETE /pods/"*)
             if [[ -z "$active_pod_id" || "$path" != "/pods/$active_pod_id" ]]; then
                 return 1
+            fi
+            # 模擬「這台已經被別人砍掉了」：回 44，由共用的 404 判定接手。
+            # 情境來自 2026-08-30：外部的 runpod_reap.sh 先砍，腳本自己的 cleanup 撞 404。
+            if [[ "${MOCK_DELETE_404_ON_ATTEMPT:-0}" -ne 0 \
+                  && "$create_count" -eq "${MOCK_DELETE_404_ON_ATTEMPT:-0}" ]]; then
+                # MOCK_404_KEEP_IN_LIST=1 → 只有 API 說 404、清單裡還在
+                # （那是「假的 404」，下游的清單檢查必須抓到它，不可以吞掉）
+                if [[ "${MOCK_404_KEEP_IN_LIST:-0}" -ne 1 ]]; then
+                    mock_write_file "$deleted_file" true
+                fi
+                return 44
             fi
             if [[ "$MOCK_DELETE_FAIL_ON_ATTEMPT" -ne 0 && "$create_count" -eq "$MOCK_DELETE_FAIL_ON_ATTEMPT" ]]; then
                 case "$mode" in
