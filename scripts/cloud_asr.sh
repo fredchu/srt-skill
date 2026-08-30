@@ -77,7 +77,8 @@ SSH_PROBE_TIMEOUT_SECONDS="${SSH_PROBE_TIMEOUT_SECONDS:-25}"
 SSH_COMMAND_TIMEOUT_SECONDS="${SSH_COMMAND_TIMEOUT_SECONDS:-1800}"
 POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-15}"
 SSH_READY_TIMEOUT_SECONDS="${SSH_READY_TIMEOUT_SECONDS:-420}"
-REMOTE_MODEL_ID="SoybeanMilk/faster-whisper-Breeze-ASR-25"
+REMOTE_BREEZE_MODEL_ID="SoybeanMilk/faster-whisper-Breeze-ASR-25"
+REMOTE_LARGEV3_MODEL_ID="Systran/faster-whisper-large-v3"
 REMOTE_VV_MODEL_ID="microsoft/VibeVoice-ASR-HF"
 REMOTE_AUDIO_DIR="/root/in"
 REMOTE_OUTPUT_DIR="/root/out"
@@ -85,6 +86,8 @@ VV_TERMS_FILE=""
 VV_TERMS_MAX=50
 VV_JSON_ENABLED=false
 ASR_MODE=""
+ASR_INITIAL_PROMPT=""
+INITIAL_PROMPT_CLI_SEEN=false
 COST_CAP_SECONDS="$({
     RUNPOD_ESTIMATED_RATE_PER_HR="$RUNPOD_ESTIMATED_RATE_PER_HR" \
     COST_CAP_USD="$COST_CAP_USD" \
@@ -107,9 +110,12 @@ POD_TERMINATED=false
 REMOTE_FLAC_PATH=""
 REMOTE_EVIDENCE_SCRIPT=""
 REMOTE_JSON_PATH=""
+REMOTE_REQUEST_JSON_PATH=""
 LOCAL_FLAC_PATH=""
 LOCAL_JSON_PATH=""
 LOCAL_SRT_PATH=""
+LOCAL_REQUEST_JSON_PATH=""
+CURRENT_REMOTE_MODEL_ID=""
 REMOTE_CUDA_CHECK_SCRIPT=""
 REMOTE_INSTALL_SCRIPT=""
 REMOTE_ASR_SCRIPT=""
@@ -127,7 +133,7 @@ TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 
 show_help() {
     cat <<EOF
-Usage: cloud_asr.sh <wav_path> <output_dir> <output_basename> <language> (--breeze|--vv) [--terms FILE] [--terms-max N] [--json]
+Usage: cloud_asr.sh <wav_path> <output_dir> <output_basename> <language> (--breeze|--largev3|--vv) [--initial-prompt TEXT] [--terms FILE] [--terms-max N] [--json]
 
 Run cloud ASR on a RunPod 4090 pod, fetch the raw JSON, and render the final SRT.
 
@@ -137,6 +143,8 @@ Arguments:
   <output_basename>   Output basename without extension.
   <language>          Transcription language.
   --breeze            Breeze cloud mode (existing behavior).
+  --largev3           faster-whisper large-v3 cloud mode (explicit opt-in).
+  --initial-prompt    Optional initial prompt (only valid with --largev3).
   --vv                VibeVoice cloud mode.
   --terms FILE        Optional VibeVoice prompt terms file.
   --terms-max N       Prompt terms limit (default: 50).
@@ -145,7 +153,6 @@ Arguments:
 Rejected:
   --turbo             Not tested on cloud.
   Missing mode flag   Rejected.
-  INITIAL_PROMPT      Not accepted.
 
 Environment:
   RUNPOD_API_KEY           Required RunPod API key.
@@ -847,6 +854,10 @@ scp_upload() {
     local status output
 
     if [[ -n "${CLOUD_ASR_TEST_HOOK:-}" ]]; then
+        if [[ "$remote_path" == "${REMOTE_OUTPUT_DIR}/env/asr_request.json" ]]; then
+            mkdir -p "$TMP_DIR/mock_runpod"
+            cp "$local_path" "$TMP_DIR/mock_runpod/asr_request_uploaded.json"
+        fi
         return 0
     fi
 
@@ -873,13 +884,38 @@ scp_download() {
     local status output
 
     if [[ -n "${CLOUD_ASR_TEST_HOOK:-}" ]]; then
+        local mock_request_file="$TMP_DIR/mock_runpod/asr_request_uploaded.json"
         mkdir -p "$(dirname "$local_path")"
         case "$(basename "$local_path")" in
             pod_id.txt)
                 printf '%s\n' "$POD_ID" >"$local_path"
                 ;;
+            prompt_sent.txt)
+                if [[ -r "$mock_request_file" ]]; then
+                    python3 - "$mock_request_file" "$local_path" <<'PY'
+import json
+import pathlib
+import sys
+
+request = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+prompt = request.get("initial_prompt", "")
+if not isinstance(prompt, str):
+    prompt = str(prompt)
+pathlib.Path(sys.argv[2]).write_text(prompt, encoding="utf-8")
+PY
+                else
+                    : >"$local_path"
+                fi
+                ;;
             terms_sent.txt)
                 printf '%s\n' "$VV_PROMPT" >"$local_path"
+                ;;
+            asr_request.json)
+                if [[ -r "$mock_request_file" ]]; then
+                    cat "$mock_request_file" >"$local_path"
+                else
+                    printf '{}\n' >"$local_path"
+                fi
                 ;;
             vv_env.json)
                 if [[ -n "${CLOUD_ASR_TEST_VV_ENV_JSON_FILE:-}" && -r "$CLOUD_ASR_TEST_VV_ENV_JSON_FILE" ]]; then
@@ -971,9 +1007,52 @@ wait_for_ssh_ready() {
     done
 }
 
+resolve_remote_model_id() {
+    case "$ASR_MODE" in
+        breeze)
+            printf '%s\n' "$REMOTE_BREEZE_MODEL_ID"
+            ;;
+        largev3)
+            printf '%s\n' "$REMOTE_LARGEV3_MODEL_ID"
+            ;;
+        *)
+            die "unsupported ASR mode for faster-whisper path: $ASR_MODE"
+            ;;
+    esac
+}
+
+build_remote_asr_request_file() {
+    local model_id="$1"
+    local request_file="$2"
+
+    if [[ -n "$ASR_INITIAL_PROMPT" ]]; then
+        jq -n \
+            --arg model_id "$model_id" \
+            --arg audio_path "$REMOTE_FLAC_PATH" \
+            --arg json_path "$REMOTE_JSON_PATH" \
+            --arg language "$LANGUAGE" \
+            --arg initial_prompt "$ASR_INITIAL_PROMPT" \
+            '{model_id:$model_id,audio_path:$audio_path,json_path:$json_path,language:$language,initial_prompt:$initial_prompt}' \
+            >"$request_file"
+    else
+        jq -n \
+            --arg model_id "$model_id" \
+            --arg audio_path "$REMOTE_FLAC_PATH" \
+            --arg json_path "$REMOTE_JSON_PATH" \
+            --arg language "$LANGUAGE" \
+            '{model_id:$model_id,audio_path:$audio_path,json_path:$json_path,language:$language}' \
+            >"$request_file"
+    fi
+}
+
 write_remote_scripts() {
     REMOTE_FLAC_PATH="${REMOTE_AUDIO_DIR}/${BASENAME}.flac"
     REMOTE_JSON_PATH="${REMOTE_OUTPUT_DIR}/${BASENAME}.cloud.json"
+    REMOTE_REQUEST_JSON_PATH="${REMOTE_OUTPUT_DIR}/env/asr_request.json"
+    LOCAL_REQUEST_JSON_PATH="${TMP_DIR}/${BASENAME}.asr_request.json"
+    CURRENT_REMOTE_MODEL_ID="$(resolve_remote_model_id)"
+    build_remote_asr_request_file "$CURRENT_REMOTE_MODEL_ID" "$LOCAL_REQUEST_JSON_PATH"
+
     REMOTE_CUDA_CHECK_SCRIPT="${TMP_DIR}/remote_cuda_check.sh"
     REMOTE_INSTALL_SCRIPT="${TMP_DIR}/remote_install_env.sh"
     REMOTE_ASR_SCRIPT="${TMP_DIR}/remote_asr.sh"
@@ -998,27 +1077,37 @@ EOF
     cat >"$REMOTE_PREP_DIRS_SCRIPT" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-mkdir -p /root/in /root/out /root/bench
+mkdir -p /root/in /root/out /root/bench /root/out/env
 EOF
 
-    local remote_model_id_q remote_audio_path_q remote_json_path_q remote_pod_id_q remote_env_dir_q
-    printf -v remote_model_id_q '%q' "$REMOTE_MODEL_ID"
-    printf -v remote_audio_path_q '%q' "$REMOTE_FLAC_PATH"
-    printf -v remote_json_path_q '%q' "$REMOTE_JSON_PATH"
+    local remote_pod_id_q remote_env_dir_q remote_request_json_q
     printf -v remote_pod_id_q '%q' "$POD_ID"
     printf -v remote_env_dir_q '%q' "${REMOTE_OUTPUT_DIR}/env"
+    printf -v remote_request_json_q '%q' "$REMOTE_REQUEST_JSON_PATH"
 
     cat >"$REMOTE_EVIDENCE_SCRIPT" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 export CLOUD_ASR_POD_ID=$remote_pod_id_q
 export CLOUD_ASR_ENV_DIR=$remote_env_dir_q
+export CLOUD_ASR_REQUEST_JSON=$remote_request_json_q
 mkdir -p "\$CLOUD_ASR_ENV_DIR"
 printf '%s\n' "\$CLOUD_ASR_POD_ID" > "\$CLOUD_ASR_ENV_DIR/pod_id.txt"
 nvidia-smi > "\$CLOUD_ASR_ENV_DIR/nvidia-smi.txt" 2>&1
 python3 - <<'PY' > "\$CLOUD_ASR_ENV_DIR/torch_version.txt"
+import json
+import os
+from pathlib import Path
+
 import sys
 import torch
+
+env_dir = Path(os.environ["CLOUD_ASR_ENV_DIR"])
+request = json.loads(Path(os.environ["CLOUD_ASR_REQUEST_JSON"]).read_text(encoding="utf-8"))
+prompt = request.get("initial_prompt", "")
+if not isinstance(prompt, str):
+    prompt = str(prompt)
+(env_dir / "prompt_sent.txt").write_text(prompt, encoding="utf-8")
 print(f"python={sys.version.split()[0]}")
 print(f"torch={torch.__version__}")
 print(f"cuda={torch.version.cuda}")
@@ -1029,10 +1118,7 @@ EOF
     cat >"$REMOTE_ASR_SCRIPT" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export CLOUD_ASR_MODEL_ID=$remote_model_id_q
-export CLOUD_ASR_AUDIO_PATH=$remote_audio_path_q
-export CLOUD_ASR_JSON_PATH=$remote_json_path_q
-export CLOUD_ASR_LANGUAGE=$(printf '%q' "$LANGUAGE")
+export CLOUD_ASR_REQUEST_JSON=$remote_request_json_q
 python3 -u - <<'PY'
 from __future__ import annotations
 
@@ -1043,29 +1129,34 @@ from pathlib import Path
 import torch
 from faster_whisper import WhisperModel
 
-model_id = os.environ["CLOUD_ASR_MODEL_ID"]
-audio_path = Path(os.environ["CLOUD_ASR_AUDIO_PATH"])
-json_path = Path(os.environ["CLOUD_ASR_JSON_PATH"])
-language = os.environ["CLOUD_ASR_LANGUAGE"]
+request = json.loads(Path(os.environ["CLOUD_ASR_REQUEST_JSON"]).read_text(encoding="utf-8"))
+model_id = str(request["model_id"])
+audio_path = Path(request["audio_path"])
+json_path = Path(request["json_path"])
+language = str(request["language"])
+initial_prompt = request.get("initial_prompt")
 
 if not torch.cuda.is_available():
     raise SystemExit("torch.cuda.is_available() is False on the remote pod")
 
 json_path.parent.mkdir(parents=True, exist_ok=True)
 model = WhisperModel(model_id, device="cuda", compute_type="float16")
-segments_iterator, _info = model.transcribe(
-    str(audio_path),
-    language=language,
-    task="transcribe",
-    condition_on_previous_text=False,
-    temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-    compression_ratio_threshold=2.4,
-    log_prob_threshold=-1.0,
-    no_speech_threshold=0.6,
-    beam_size=1,
-    word_timestamps=True,
-    vad_filter=False,
-)
+transcribe_kwargs: dict[str, object] = {
+    "language": language,
+    "task": "transcribe",
+    "condition_on_previous_text": False,
+    "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    "compression_ratio_threshold": 2.4,
+    "log_prob_threshold": -1.0,
+    "no_speech_threshold": 0.6,
+    "beam_size": 1,
+    "word_timestamps": True,
+    "vad_filter": False,
+}
+if isinstance(initial_prompt, str) and initial_prompt:
+    transcribe_kwargs["initial_prompt"] = initial_prompt
+
+segments_iterator, _info = model.transcribe(str(audio_path), **transcribe_kwargs)
 
 segments: list[dict[str, object]] = []
 for segment in segments_iterator:
@@ -1091,7 +1182,7 @@ print(f"wrote {json_path} ({len(segments)} segments)", flush=True)
 PY
 EOF
 
-    chmod 700 "$REMOTE_CUDA_CHECK_SCRIPT" "$REMOTE_INSTALL_SCRIPT" "$REMOTE_ASR_SCRIPT" "$REMOTE_PREP_DIRS_SCRIPT"
+    chmod 700 "$REMOTE_CUDA_CHECK_SCRIPT" "$REMOTE_INSTALL_SCRIPT" "$REMOTE_ASR_SCRIPT" "$REMOTE_PREP_DIRS_SCRIPT" "$REMOTE_EVIDENCE_SCRIPT"
 }
 
 write_vv_remote_scripts() {
@@ -1799,7 +1890,7 @@ if [[ $# -eq 1 && ( "$1" == "--help" || "$1" == "-h" ) ]]; then
 fi
 
 if [[ $# -lt 5 ]]; then
-    error "missing model flag: only --breeze is supported"
+    error "missing model flag: choose one of --breeze / --largev3 / --vv"
     show_help
     exit 2
 fi
@@ -1810,11 +1901,20 @@ BASENAME="$3"
 LANGUAGE="$4"
 shift 4
 MODEL_FLAGS=()
+INITIAL_PROMPT_CLI_VALUE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --breeze|--turbo|--vv)
+        --breeze|--largev3|--turbo|--vv)
             MODEL_FLAGS+=("$1")
             shift
+            ;;
+        --initial-prompt)
+            if [[ $# -lt 2 ]]; then
+                die "missing value for --initial-prompt"
+            fi
+            INITIAL_PROMPT_CLI_SEEN=true
+            INITIAL_PROMPT_CLI_VALUE="$2"
+            shift 2
             ;;
         --terms)
             if [[ $# -lt 2 ]]; then
@@ -1841,13 +1941,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${#MODEL_FLAGS[@]}" in
+    0)
+        die "missing model flag: choose one of --breeze / --largev3 / --vv"
+        ;;
     1)
         case "${MODEL_FLAGS[0]}" in
             --breeze)
                 ASR_MODE="breeze"
                 ;;
+            --largev3)
+                ASR_MODE="largev3"
+                ;;
             --turbo)
-                die "cloud ASR only supports --breeze; this configuration was not tested on cloud. Use subtitle.sh --breeze or revert to --engine=mlx."
+                die "cloud ASR rejects --turbo: this configuration was not fully validated on cloud. Use --breeze / --largev3, or revert to --engine=mlx."
                 ;;
             --vv)
                 ASR_MODE="vv"
@@ -1857,27 +1963,23 @@ case "${#MODEL_FLAGS[@]}" in
                 ;;
         esac
         ;;
-    2)
+    *)
         if [[ ( "${MODEL_FLAGS[0]}" == "--breeze" && "${MODEL_FLAGS[1]}" == "--turbo" ) || ( "${MODEL_FLAGS[0]}" == "--turbo" && "${MODEL_FLAGS[1]}" == "--breeze" ) ]]; then
-            die "cloud ASR only supports --breeze; --breeze and --turbo cannot both be set."
+            die "cloud ASR rejects --turbo: --breeze and --turbo cannot both be set."
         fi
         die "invalid model flag combination: ${MODEL_FLAGS[*]}"
         ;;
-    *)
-        die "cloud ASR only supports --breeze"
-        ;;
 esac
 
-if [[ "$ASR_MODE" == "breeze" && ( -n "$VV_TERMS_FILE" || "$VV_TERMS_MAX" != "50" || "$VV_JSON_ENABLED" == true ) ]]; then
+if [[ "$ASR_MODE" != "vv" && ( -n "$VV_TERMS_FILE" || "$VV_TERMS_MAX" != "50" || "$VV_JSON_ENABLED" == true ) ]]; then
     die "VV options are only valid with --vv"
 fi
 
-# `[[ -v VAR ]]` 需要 bash 4.2 以上，但 macOS 內建的 /bin/bash 是 3.2.57
-# （蘋果因授權問題二十年沒更新），shebang 的 `env bash` 在沒裝 brew bash 的
-# 機器上就會指到它，整支腳本在這行炸掉並回 exit 2。
-# `${VAR+x}` 是 3.2 就有的等價寫法：變數有設定就展開成 x，即使是空字串。
-if [[ -n "${INITIAL_PROMPT+x}" ]]; then
-    die "INITIAL_PROMPT is not accepted by cloud_asr.sh"
+if [[ "$ASR_MODE" != "largev3" && "$INITIAL_PROMPT_CLI_SEEN" == true ]]; then
+    die "--initial-prompt is only valid with --largev3"
+fi
+if [[ "$ASR_MODE" == "largev3" && "$INITIAL_PROMPT_CLI_SEEN" == true && -n "$INITIAL_PROMPT_CLI_VALUE" ]]; then
+    ASR_INITIAL_PROMPT="$INITIAL_PROMPT_CLI_VALUE"
 fi
 
 if [[ ! -f "$WAV_PATH" ]]; then
@@ -2051,6 +2153,7 @@ check_cost_cap
 # LOCAL_FLAC_PATH 已在開 pod 之前產生，這裡不再重轉。
 REMOTE_FLAC_PATH="${REMOTE_AUDIO_DIR}/${BASENAME}.flac"
 REMOTE_JSON_PATH="${REMOTE_OUTPUT_DIR}/${BASENAME}.cloud.json"
+REMOTE_REQUEST_JSON_PATH="${REMOTE_OUTPUT_DIR}/env/asr_request.json"
 LOCAL_JSON_PATH="${OUTPUT_DIR}/${BASENAME}.cloud.json"
 LOCAL_SRT_PATH="${OUTPUT_DIR}/${BASENAME}.srt"
 
@@ -2066,6 +2169,19 @@ else
         die "SSH public key denied by RunPod backend"
     fi
     die "remote directory preparation failed on pod $POD_ID (exit $status)"
+fi
+check_cost_cap
+
+info "uploading ASR request JSON to root@$POD_IP -p $POD_PORT"
+if scp_upload "$LOCAL_REQUEST_JSON_PATH" "$POD_IP" "$POD_PORT" "$REMOTE_REQUEST_JSON_PATH"; then
+    :
+else
+    status=$?
+    terminate_pod || true
+    if [[ $status -eq 42 ]]; then
+        die "SSH public key denied by RunPod backend"
+    fi
+    die "ASR request upload failed to root@$POD_IP -p $POD_PORT (exit $status)"
 fi
 check_cost_cap
 
@@ -2095,7 +2211,7 @@ else
 fi
 
 mkdir -p "$OUTPUT_DIR/env"
-for evidence_path in "$OUTPUT_DIR/env/nvidia-smi.txt" "$OUTPUT_DIR/env/pod_id.txt"; do
+for evidence_path in "$OUTPUT_DIR/env/nvidia-smi.txt" "$OUTPUT_DIR/env/pod_id.txt" "$OUTPUT_DIR/env/prompt_sent.txt" "$OUTPUT_DIR/env/asr_request.json"; do
     if [[ -e "$evidence_path" ]]; then
         die "refusing to overwrite existing evidence file: $evidence_path"
     fi
@@ -2121,14 +2237,78 @@ else
     fi
     die "pod id evidence download failed from root@$POD_IP -p $POD_PORT (exit $status)"
 fi
+if scp_download "$POD_IP" "$POD_PORT" "${REMOTE_OUTPUT_DIR}/env/prompt_sent.txt" "$OUTPUT_DIR/env/prompt_sent.txt"; then
+    :
+else
+    status=$?
+    terminate_pod || true
+    if [[ $status -eq 42 ]]; then
+        die "SSH public key denied by RunPod backend"
+    fi
+    die "prompt evidence download failed from root@$POD_IP -p $POD_PORT (exit $status)"
+fi
+if scp_download "$POD_IP" "$POD_PORT" "${REMOTE_OUTPUT_DIR}/env/asr_request.json" "$OUTPUT_DIR/env/asr_request.json"; then
+    :
+else
+    status=$?
+    terminate_pod || true
+    if [[ $status -eq 42 ]]; then
+        die "SSH public key denied by RunPod backend"
+    fi
+    die "ASR request evidence download failed from root@$POD_IP -p $POD_PORT (exit $status)"
+fi
 if [[ "$(tr -d '\r\n' < "$OUTPUT_DIR/env/pod_id.txt")" != "$POD_ID" ]]; then
     terminate_pod || true
     die "pod id evidence mismatch after download: expected $POD_ID"
 fi
+if ! python3 - "$OUTPUT_DIR/env/asr_request.json" "$CURRENT_REMOTE_MODEL_ID" "$LANGUAGE" "$ASR_INITIAL_PROMPT" "$REMOTE_FLAC_PATH" "$REMOTE_JSON_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+request = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+model_id = sys.argv[2]
+language = sys.argv[3]
+prompt = sys.argv[4]
+remote_flac_path = sys.argv[5]
+remote_json_path = sys.argv[6]
+
+if request.get("model_id") != model_id:
+    raise SystemExit("model_id mismatch")
+if request.get("language") != language:
+    raise SystemExit("language mismatch")
+if request.get("audio_path") != remote_flac_path:
+    raise SystemExit("audio_path mismatch")
+if request.get("json_path") != remote_json_path:
+    raise SystemExit("json_path mismatch")
+if prompt:
+    if request.get("initial_prompt") != prompt:
+        raise SystemExit("initial_prompt mismatch")
+else:
+    if "initial_prompt" in request:
+        raise SystemExit("initial_prompt must be absent when prompt is empty")
+PY
+then
+    terminate_pod || true
+    die "ASR request evidence mismatch after download"
+fi
+if ! python3 - "$OUTPUT_DIR/env/prompt_sent.txt" "$ASR_INITIAL_PROMPT" <<'PY'
+import pathlib
+import sys
+
+actual = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+expected = sys.argv[2]
+if actual != expected:
+    raise SystemExit("prompt_sent mismatch")
+PY
+then
+    terminate_pod || true
+    die "prompt_sent evidence mismatch after download"
+fi
 check_cost_cap
 
 fail_step 6
-info "running faster-whisper Breeze-ASR-25 CT2 FP16 on pod $POD_ID"
+info "running faster-whisper model ${CURRENT_REMOTE_MODEL_ID} CT2 FP16 on pod $POD_ID"
 if ssh_run_script "asr" "$POD_IP" "$POD_PORT" "$REMOTE_ASR_SCRIPT"; then
     :
 else

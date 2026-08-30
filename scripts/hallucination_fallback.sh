@@ -1,20 +1,20 @@
 #!/bin/bash
 # ASR 幻覺 fallback：用 Whisper large-v3 重跑 Breeze 無法修復的幻覺段
-# 用法：hallucination_fallback.sh <SRT檔> <影片或音檔> <起始時間> <結束時間> [initial_prompt]
+# 用法：hallucination_fallback.sh <SRT檔> <影片或音檔> <起始時間> <結束時間> [可選提示詞]
 #
 # ASR 引擎：預設本地 mlx；設 SRT_ASR_ENGINE=runpod 走雲端 RTX 4090。
 #
-# ⚠️ 雲端路徑尚未實作（見下方 runpod 分支）。已知的前置證據與其邊界：
+# 已知前置證據：
 # 雲端 Systran/faster-whisper-large-v3 的逐字時間戳與本地 MLX 逐字相同
-# （正常段 95 個字裡 89 個到毫秒一致、其餘 6 個差 0.02 秒）——
-# **但那是兩邊都不帶 initial_prompt 量的**。本腳本的生產配方會帶 prompt，
-# 而雲端目前不支援 prompt，所以「逐字相同」不能外推到生產情境。
-# 範例：hallucination_fallback.sh final.srt video.mp4 00:55:33 00:56:07 "在Seeking Alpha上面"
+# （正常段 95 個字裡 89 個到毫秒一致、其餘 6 個差 0.02 秒）。
+# 範例：hallucination_fallback.sh final.srt video.mp4 00:55:33 00:56:07
 #
 # 流程：截取音檔 → Whisper large-v3 重跑 → 時間偏移 → patch 回 SRT
 # 注意：一定用 whisper-large-v3-mlx，不要用 turbo
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 SRT_FILE="$1"
 MEDIA_FILE="$2"
@@ -59,16 +59,47 @@ if [ -n "$INITIAL_PROMPT" ]; then
 fi
 
 if [ "${ASR_ENGINE}" = "runpod" ]; then
-  # 尚未實作。這裡自己 die 而不是往下呼叫 cloud_asr.sh，理由是：
-  # cloud_asr.sh 只有 Breeze 模式（REMOTE_MODEL_ID 寫死 ct2 Breeze、
-  # 轉檔寫死 cloud_to_srt.py breeze），要支援這步需要的是「加一個 large-v3 模式」
-  # 而不是「放寬旗標檢查」。硬呼叫的話會連印兩句不對題的錯
-  # （cloud_asr 的 missing model flag ＋ 本腳本的 Whisper 未產出 SRT），
-  # 沒有一句說出真相。
-  echo "ERROR: Step 1.5 尚不支援 --engine=runpod：cloud_asr.sh 目前只有 Breeze 模式。" >&2
-  echo "       請改用 SRT_ASR_ENGINE=mlx（本地），或等 cloud_asr.sh 加入 large-v3 模式。" >&2
-  rm -f "$FIX_WAV"
-  exit 1
+  CLOUD_RUNS_DIR="${WORK_DIR}/.cloud_asr_runs"
+  mkdir -p "$CLOUD_RUNS_DIR"
+  CLOUD_RUN_DIR="$(mktemp -d "${CLOUD_RUNS_DIR}/run.XXXXXX")"
+  CLOUD_EVIDENCE_DIR="${CLOUD_RUN_DIR}/env"
+  echo "RunPod cloud ASR run dir: ${CLOUD_RUN_DIR}" >&2
+  echo "RunPod evidence dir: ${CLOUD_EVIDENCE_DIR}" >&2
+
+  CLOUD_ARGS=(
+    "$SCRIPT_DIR/cloud_asr.sh"
+    "$FIX_WAV"
+    "$CLOUD_RUN_DIR"
+    "_fix_segment"
+    "zh"
+    "--largev3"
+  )
+  if [ -n "$INITIAL_PROMPT" ]; then
+    CLOUD_ARGS+=(--initial-prompt "$INITIAL_PROMPT")
+  fi
+  if ! bash "${CLOUD_ARGS[@]}"; then
+    rm -f "$FIX_WAV"
+    exit 1
+  fi
+
+  CLOUD_FIX_SRT="${CLOUD_RUN_DIR}/_fix_segment.srt"
+  CLOUD_FIX_JSON="${CLOUD_RUN_DIR}/_fix_segment.cloud.json"
+  if ! [ -f "$CLOUD_FIX_SRT" ]; then
+    echo "ERROR: cloud_asr.sh 未產出修復 SRT：$CLOUD_FIX_SRT" >&2
+    rm -f "$FIX_WAV"
+    exit 1
+  fi
+  if [ -f "$FIX_SRT" ]; then
+    cp "$FIX_SRT" "${CLOUD_RUN_DIR}/previous__fix_segment.srt"
+  fi
+  if [ -f "${WORK_DIR}/_fix_segment.cloud.json" ]; then
+    cp "${WORK_DIR}/_fix_segment.cloud.json" "${CLOUD_RUN_DIR}/previous__fix_segment.cloud.json"
+  fi
+
+  cp "$CLOUD_FIX_SRT" "$FIX_SRT"
+  if [ -f "$CLOUD_FIX_JSON" ]; then
+    cp "$CLOUD_FIX_JSON" "${WORK_DIR}/_fix_segment.cloud.json"
+  fi
 else
   mlx_whisper "${WHISPER_ARGS[@]}" "$FIX_WAV"
 fi
