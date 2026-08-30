@@ -34,11 +34,15 @@ RUNPOD_ESTIMATED_RATE_PER_HR="${RUNPOD_ESTIMATED_RATE_PER_HR:-0.751}"
 # 設成空字串就不加這個約束（回到舊行為）。
 RUNPOD_MIN_CUDA="${RUNPOD_MIN_CUDA:-12.8}"
 
-# FLAC 壓縮等級。原本寫死 12（最高），2026-08-30 對 109 分鐘的 Opus 輸入
-# 實測 RTF > 1.6（10 分鐘切片跑超過 16 分鐘還沒完）。
-# ⚠️ 真因尚未歸因——可能是等級、可能是解 Opus、可能是重採樣，量測進行中。
-# 先降到預設等級 5，數字出來再定。改這個值不影響結構。
-FLAC_COMPRESSION_LEVEL="${FLAC_COMPRESSION_LEVEL:-5}"
+# FLAC 壓縮等級。**真因已找到，不是這個值**，所以維持 12（最高、檔案最小）。
+#
+# 2026-08-30 的慢是因為缺 `-vn`：FLAC 容器接受附圖，ffmpeg 於是把整條 h264
+# 影片軌逐幀解碼轉成 PNG 塞進去當封面。那 700% CPU 是在解影片不是壓聲音。
+# stream mapping 印出來就看得到：`Stream #0:0 -> #0:0 (h264 -> png)`。
+#
+# 20 秒切片實測：無 -vn 58.3 秒、有 -vn 0.2 秒——**291 倍**。
+# 在 16 kHz 單聲道上，等級 12 只要 0.1 秒，所以沒有降級的理由。
+FLAC_COMPRESSION_LEVEL="${FLAC_COMPRESSION_LEVEL:-12}"
 
 COST_CAP_USD="${COST_CAP_USD:-0.5}"
 SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY:-$HOME/.ssh/id_ed25519}"
@@ -472,7 +476,12 @@ normalize_input_audio() {
     local src="$1" dst="$2" ff_log="${TMP_DIR}/normalize.log"
 
     info "normalizing input audio → 16 kHz mono (before creating any pod)"
-    if ffmpeg -nostdin -y -i "$src" -vn -ar 16000 -ac 1 \
+    # `-vn` 不可省：沒有它，ffmpeg 會把整條影片軌逐幀轉 PNG 塞進 FLAC 當封面。
+    #   20 秒切片實測：無 -vn 58.3 秒、有 -vn 0.2 秒（291 倍）。
+    #   109 分鐘的影片換算要 5.3 小時——它本來就永遠跑不完。
+    # `-sample_fmt s16` 不可省：直接從 Opus 轉會變 24-bit，檔案大一倍。
+    #   同一段 20 秒：672 KB → 335 KB。
+    if ffmpeg -nostdin -y -i "$src" -vn -ar 16000 -ac 1 -sample_fmt s16 \
               -c:a flac -compression_level "$FLAC_COMPRESSION_LEVEL" \
               "$dst" >"$ff_log" 2>&1; then
         local sec
