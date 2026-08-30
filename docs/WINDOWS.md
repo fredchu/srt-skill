@@ -11,7 +11,9 @@
 
 ### TL;DR
 
-The skill's **orchestration + LLM-correction layers are cross-platform Python and work on Windows**. The **local ASR backends are MLX (Apple Silicon only)** and do **not** run natively on Windows. The fix is to **swap the ASR step for a Windows-friendly engine** (e.g. `faster-whisper`) and feed its `.srt` into the rest of the pipeline unchanged.
+**As of v1.8.0 there is a supported path: `--engine=runpod` runs the ASR on a rented cloud GPU, so no local Apple Silicon is needed.** See [CLOUD-ASR-SETUP.md](CLOUD-ASR-SETUP.md). This is the recommended route for Windows; the rest of this document describes the older substitute-your-own-engine approach, which is still valid if you prefer to keep everything local.
+
+The skill's **orchestration + LLM-correction layers are cross-platform Python and work on Windows**. The **local ASR backends are MLX (Apple Silicon only)** and do **not** run natively on Windows. Two ways around that: use `--engine=runpod` (cloud, ~US$0.05-0.15 per 50-minute video), or **swap the ASR step for a Windows-friendly engine** (e.g. `faster-whisper`) and feed its `.srt` into the rest of the pipeline unchanged.
 
 **Recommended environment: WSL2 (Ubuntu).** The pipeline includes bash scripts (`subtitle.sh`, `hallucination_fallback.sh`) and one Unix-only module (`vv_longaudio.py` uses `fcntl`), so a Linux userland avoids the most friction. Native PowerShell works for the pure-Python steps but not the bash/`fcntl` parts.
 
@@ -21,9 +23,10 @@ The skill's **orchestration + LLM-correction layers are cross-platform Python an
 |------|:--:|:--:|-------|
 | Step 0 — `yt-dlp` download | ✅ | ✅ | cross-platform |
 | Step 0.5 — OCR terms (RapidOCR, default) | ✅ | ✅ | `auto` default; pure-CPU cross-platform, `pip install "rapidocr>=3.9,<4" onnxruntime`. VLM caption still available via `--engine ollama` (Ollama runs on Windows; `mlx-vlm` fallback does **not**) |
-| **Step 1 — Breeze/Whisper ASR (MLX)** | ❌ | ❌ | MLX is Apple-Silicon-only → **substitute** (see below) |
-| Step 1' — VibeVoice ASR (MLX) | ❌ | ❌ | optional; skip on Windows |
-| Step 1.5 — hallucination fix | ⚠️ | ✅ | re-runs ASR internally → needs the substitute ASR wired in |
+| **Step 1 — Breeze ASR via `--engine=runpod`** | ⚠️ | ✅ | **cloud GPU, no MLX needed**; verified end-to-end on a 109-minute video from a machine with no MLX, no coreutils and bash 3.2 (2026-08-30). Native Windows untested — the scripts are bash |
+| Step 1 — Breeze/Whisper ASR (local MLX) | ❌ | ❌ | MLX is Apple-Silicon-only → use `--engine=runpod` or **substitute** (see below) |
+| Step 1' — VibeVoice ASR (MLX) | ❌ | ❌ | optional; **no cloud path yet**; skipped under `--engine=runpod` |
+| Step 1.5 — hallucination fix | ⚠️ | ✅ | re-runs ASR internally → inherits whichever engine Step 1 used |
 | Step 2a — preprocess | ✅ | ✅ | pure Python |
 | Step 2b — LLM correction (Claude subagents) | ✅ | ✅ | Claude Code runs on Windows |
 | Step 2b/2c — `--local` (Ollama) | ✅ | ✅ | Ollama runs on Windows |
