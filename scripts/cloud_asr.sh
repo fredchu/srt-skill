@@ -34,6 +34,20 @@ RUNPOD_ESTIMATED_RATE_PER_HR="${RUNPOD_ESTIMATED_RATE_PER_HR:-0.751}"
 # 設成空字串就不加這個約束（回到舊行為）。
 RUNPOD_MIN_CUDA="${RUNPOD_MIN_CUDA:-12.8}"
 
+# 直連埠生不出來時最多換幾台機器。
+#
+# 預設 3 是因為那個埠約一半機率不生成，換一台通常就好。
+# **但預算緊的時候需要「只試一次」**：2026-08-30 剩 US$0.25 要跑最後一項驗收，
+# 一次壞機器就吃掉 US$0.09，開到第三台會直接超支。
+# 當時這個值寫死在四個地方、沒有旗標可關，只能靠外部監看到 timeout 就 SIGTERM
+# 整支腳本——那能work但很脆（要搶在第二台開起來之前）。
+#
+# `MAX_POD_ATTEMPTS=1` 就是「壞了就停，不換機器」。
+MAX_POD_ATTEMPTS="${MAX_POD_ATTEMPTS:-3}"
+case "$MAX_POD_ATTEMPTS" in
+    ''|*[!0-9]*|0) echo "[cloud_asr.sh] ERROR: MAX_POD_ATTEMPTS 必須是正整數，收到：$MAX_POD_ATTEMPTS" >&2; exit 1 ;;
+esac
+
 # FLAC 壓縮等級。**真因已找到，不是這個值**，所以維持 12（最高、檔案最小）。
 #
 # 2026-08-30 的慢是因為缺 `-vn`：FLAC 容器接受附圖，ffmpeg 於是把整條 h264
@@ -1454,8 +1468,8 @@ run_vv_mode() {
     ATTEMPT=0
     while :; do
         ATTEMPT=$((ATTEMPT + 1))
-        if (( ATTEMPT > 3 )); then
-            die "direct endpoint unavailable after 3 pods; giving up"
+        if (( ATTEMPT > MAX_POD_ATTEMPTS )); then
+            die "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
         fi
 
         create_pod
@@ -1475,8 +1489,8 @@ run_vv_mode() {
             if ! terminate_pod; then
                 die "timed out waiting for direct SSH on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
             fi
-            if (( ATTEMPT >= 3 )); then
-                die "direct endpoint unavailable after 3 pods; giving up"
+            if (( ATTEMPT >= MAX_POD_ATTEMPTS )); then
+                die "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
             fi
             continue
         fi
@@ -1946,8 +1960,8 @@ info "budget cap: ${COST_CAP_USD} USD (~${COST_CAP_SECONDS}s at ~${RUNPOD_ESTIMA
 ATTEMPT=0
 while :; do
     ATTEMPT=$((ATTEMPT + 1))
-    if (( ATTEMPT > 3 )); then
-        die "direct endpoint unavailable after 3 pods; giving up"
+    if (( ATTEMPT > MAX_POD_ATTEMPTS )); then
+        die "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
     fi
 
     create_pod
@@ -1966,8 +1980,8 @@ while :; do
         if ! terminate_pod; then
             die "timed out waiting for direct SSH on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
         fi
-        if (( ATTEMPT >= 3 )); then
-            die "direct endpoint unavailable after 3 pods; giving up"
+        if (( ATTEMPT >= MAX_POD_ATTEMPTS )); then
+            die "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
         fi
         continue
     fi
