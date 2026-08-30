@@ -34,6 +34,12 @@ RUNPOD_ESTIMATED_RATE_PER_HR="${RUNPOD_ESTIMATED_RATE_PER_HR:-0.751}"
 # 設成空字串就不加這個約束（回到舊行為）。
 RUNPOD_MIN_CUDA="${RUNPOD_MIN_CUDA:-12.8}"
 
+# FLAC 壓縮等級。原本寫死 12（最高），2026-08-30 對 109 分鐘的 Opus 輸入
+# 實測 RTF > 1.6（10 分鐘切片跑超過 16 分鐘還沒完）。
+# ⚠️ 真因尚未歸因——可能是等級、可能是解 Opus、可能是重採樣，量測進行中。
+# 先降到預設等級 5，數字出來再定。改這個值不影響結構。
+FLAC_COMPRESSION_LEVEL="${FLAC_COMPRESSION_LEVEL:-5}"
+
 COST_CAP_USD="${COST_CAP_USD:-0.5}"
 SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY:-$HOME/.ssh/id_ed25519}"
 SSH_PUBLIC_KEY_PATH="${SSH_PUBLIC_KEY_PATH:-$HOME/.ssh/id_ed25519.pub}"
@@ -451,6 +457,39 @@ runpod_rest_request() {
     fi
 
     cat "$response_file"
+}
+
+# 把任何 ffmpeg 讀得動的輸入正規化成上傳格式（16 kHz 單聲道）。
+#
+# ⚠️ **一定要在開 pod 之前呼叫。** 2026-08-30 全片那跑，pod 先開、
+# 本機才轉檔，而輸入是 109 分鐘的 mkv（音軌 opus / 48 kHz / 立體聲），
+# 轉檔跑了 23 分鐘還沒完，那段期間 GPU 用量 0%、機器一直計費，最後白燒 US$0.29。
+#
+# **一律轉，不分支。** 不要寫成「偵測到不是 wav 才轉」：
+# 那會漏掉「wav 但取樣率是 48k 立體聲」，而那正是同一個問題的一般化版本。
+# 少一個分支就少一種漏網，而且行為只有一種——契約反而更小。
+normalize_input_audio() {
+    local src="$1" dst="$2" ff_log="${TMP_DIR}/normalize.log"
+
+    info "normalizing input audio → 16 kHz mono (before creating any pod)"
+    if ffmpeg -nostdin -y -i "$src" -vn -ar 16000 -ac 1 \
+              -c:a flac -compression_level "$FLAC_COMPRESSION_LEVEL" \
+              "$dst" >"$ff_log" 2>&1; then
+        local sec
+        sec="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$dst" 2>/dev/null || echo '?')"
+        info "normalized audio ready: $(basename "$dst") (${sec}s)"
+        return 0
+    fi
+
+    # 失敗要在開 pod 之前死，而且訊息要帶音軌資訊——
+    # 「ffmpeg 失敗」對使用者沒有意義，「你的音軌是 opus/48000/2」才有。
+    local track
+    track="$(ffprobe -v error -select_streams a:0 \
+        -show_entries stream=codec_name,sample_rate,channels \
+        -of default=nw=1 "$src" 2>/dev/null | tr '\n' ' ')"
+    error "input audio track: ${track:-<ffprobe 也讀不到音軌>}"
+    error "ffmpeg log tail: $(tail -3 "$ff_log" 2>/dev/null | tr '\n' ' ')"
+    die "failed to normalize input audio (no pod was created, nothing billed): $src"
 }
 
 mock_runpod_rest_request() {
@@ -1884,6 +1923,10 @@ fi
 
 info "budget cap: ${COST_CAP_USD} USD (~${COST_CAP_SECONDS}s at ~${RUNPOD_ESTIMATED_RATE_PER_HR}/hr)"
 
+# ⚠️ 正規化必須在這裡，不能在開 pod 之後。見 normalize_input_audio 的說明。
+LOCAL_FLAC_PATH="${TMP_DIR}/${BASENAME}.flac"
+normalize_input_audio "$WAV_PATH" "$LOCAL_FLAC_PATH"
+
 ATTEMPT=0
 while :; do
     ATTEMPT=$((ATTEMPT + 1))
@@ -1975,14 +2018,12 @@ else
 fi
 check_cost_cap
 
-LOCAL_FLAC_PATH="${TMP_DIR}/${BASENAME}.flac"
+# LOCAL_FLAC_PATH 已在開 pod 之前產生，這裡不再重轉。
 REMOTE_FLAC_PATH="${REMOTE_AUDIO_DIR}/${BASENAME}.flac"
 REMOTE_JSON_PATH="${REMOTE_OUTPUT_DIR}/${BASENAME}.cloud.json"
 LOCAL_JSON_PATH="${OUTPUT_DIR}/${BASENAME}.cloud.json"
 LOCAL_SRT_PATH="${OUTPUT_DIR}/${BASENAME}.srt"
 
-info "converting input WAV to FLAC"
-ffmpeg -y -i "$WAV_PATH" -ar 16000 -ac 1 -c:a flac -compression_level 12 "$LOCAL_FLAC_PATH" >/dev/null 2>&1
 check_cost_cap
 
 info "preparing remote directories on root@$POD_IP -p $POD_PORT"
