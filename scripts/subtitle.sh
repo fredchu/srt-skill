@@ -112,6 +112,9 @@ INPUT_FILE=""
 # 預設維持 mlx 是刻意的——雲端輸出與本地不等價（跨側差 2.07%，兩邊自噪皆 0），
 # 詳見 company/_shared/collab/20260829-srt-cloud-asr-runpod/FINAL-srt-cloud-asr-plan.md
 ASR_ENGINE="${SRT_ASR_ENGINE:-mlx}"
+# 使用者有沒有明講要用哪個引擎。沒明講時才做能力檢查——
+# 明講了就照做，不要替使用者改主意。
+if [ -n "${SRT_ASR_ENGINE:-}" ]; then ENGINE_EXPLICIT=true; else ENGINE_EXPLICIT=false; fi
 USE_BREEZE=false
 USE_TURBO=false
 KEEP_WAV=false
@@ -135,6 +138,7 @@ for arg in "$@"; do
             ;;
         --engine=*)
             ASR_ENGINE="${arg#*=}"
+            ENGINE_EXPLICIT=true
             ;;
         --keep-wav)
             KEEP_WAV=true
@@ -172,6 +176,50 @@ if [ -z "$INPUT_FILE" ]; then
     print_error "請指定輸入檔案"
     show_usage
     exit 1
+fi
+
+# ============================================================
+# 能力檢查：這台機器跑得動本地模型嗎
+# ============================================================
+# 只在「使用者沒明講引擎」且「預設走本地」時才檢查。
+# 明講了就照做——使用者可能知道我們不知道的事。
+#
+# 為什麼要有這一關：8 GB 的機器裝得起 MLX，探針也會說「有 MLX」，
+# 但實際跑會直接報記憶體錯誤。裝得起 ≠ 跑得動。與其讓它跑到一半炸，
+# 不如先講清楚兩條路各要付什麼代價，讓使用者自己選。
+if [ "$ENGINE_EXPLICIT" = false ] && [ "$ASR_ENGINE" = "mlx" ]; then
+    CAPACITY_CHECK="$(cd "$(dirname "$0")" && pwd)/asr_capacity_check"
+    if [ -x "$CAPACITY_CHECK" ]; then
+        CAP_OUT="$("$CAPACITY_CHECK" 2>/dev/null || true)"
+        CAP_BREEZE="$(printf '%s\n' "$CAP_OUT" | sed -n 's/^breeze_local=//p')"
+        CAP_REASON="$(printf '%s\n' "$CAP_OUT" | sed -n 's/^breeze_reason=//p')"
+        case "$CAP_BREEZE" in
+            impossible)
+                print_error "這台機器跑不動本地的語音辨識"
+                echo ""
+                echo "    原因：${CAP_REASON:-記憶體不足}"
+                echo ""
+                echo "    兩條路，請選一條："
+                echo ""
+                echo "    1. 走雲端（推薦）"
+                echo "       加上 --engine=runpod，或設 SRT_ASR_ENGINE=runpod"
+                echo "       需要 RunPod 帳號與餘額，一支 50 分鐘的影片約 US\$0.05-0.15"
+                echo "       設定方式見 docs/CLOUD-ASR-SETUP.md"
+                echo ""
+                echo "    2. 仍然在本地跑（不建議）"
+                echo "       加上 --engine=mlx 強制執行。很可能跑到一半就記憶體不足失敗，"
+                echo "       那時 ASR 的時間會白花。"
+                echo ""
+                exit 1
+                ;;
+            risky)
+                print_warning "這台機器跑本地語音辨識可能會失敗：${CAP_REASON:-記憶體邊際不足}"
+                echo "    要保險的話改用 --engine=runpod（雲端，一支影片約 US\$0.05-0.15）"
+                echo "    現在照你原本的設定，繼續走本地。"
+                echo ""
+                ;;
+        esac
+    fi
 fi
 
 if [ ! -f "$INPUT_FILE" ]; then
