@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.8.0
+version: 1.9.0
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -103,9 +103,12 @@ ${SUBTITLE_DIR}/
 其他參數：
 - **ASR 模式**：預設 Breeze（`--breeze`）。用戶提到 whisper / 英文內容 / 非中文 → 用 Whisper（不加 `--breeze`）
 - **ASR 引擎**：**預設 `mlx`（本地 Apple Silicon）**。用戶提到「用 runpod」「跑雲端」「M1 Max 不在」→ `--engine=runpod`
-  （也可用 `SRT_ASR_ENGINE` 環境變數）。⚠️ **雲端只支援 `--breeze`**，其餘配置 `cloud_asr.sh` 會直接報錯。
-  ⚠️ **雲端輸出與本地不等價**：跨側文字差 2.07%，而兩邊各自跑兩次都逐位元組相同——
+  （也可用 `SRT_ASR_ENGINE` 環境變數）。
+  ⚠️ **Step 1 的雲端只支援 `--breeze`**，`--turbo` 與不帶旗標的 large-v3 都會直接報錯。
+  ⚠️ **雲端輸出與本地不等價**：Breeze 跨側文字差 2.07%（兩邊各自跑兩次都逐位元組相同）、
+  VibeVoice 跨側 **10.6%**、雲端自噪 1.8%（皆為兩側都 `s2twp` 後的口徑）。
   差異是穩定的實質差異不是雜訊，且**不知道哪邊比較對**。要用雲端請先確認用戶知道這件事。
+  一支 50 分鐘的影片約 US$0.05-0.15。設定見 `docs/CLOUD-ASR-SETUP.md`。
 - **術語表**：預設 `terms_austin_v2.txt`。用戶指定其他講者 → 尋找對應術語表
 - **投影片文字**：用戶提供投影片檔（.txt 純文字，或 .pptx/.ppt PowerPoint）→ 啟用 Step 0.5 抽取本集術語
 - **特殊要求**：`--learn`（術語學習）、`--bilingual`（雙語輸出）
@@ -216,6 +219,26 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/srt_extract_slides.py" \
 VibeVoice 做輔助 ASR，產出供 Step 2b 交叉參考。
 
 > ⚠️ **不要與 Step 1 並行**：兩者都把音檔抽到 VIDEO_DIR 內同一個 `<影片檔名>.wav`，`subtitle.sh` 清理時會刪掉它，`vibevoice_asr.py` 抽取的是同一路徑。並行時 Breeze 可能讀到被覆寫中的截斷 wav（2026-07-17：只轉出 4.6/51.8 分鐘，條數檢查放行、靠尾端時間戳才抓到），或 VV 因檔案被刪 FileNotFoundError。**等 Breeze 完成再啟動 VV**。根治是各自獨立 wav 檔名，未實作。
+
+#### VibeVoice 也可以走雲端（v1.9.0 起）
+
+沒有 Apple Silicon、或機器記憶體不足時用。**8 GB 的機器跑不動 VibeVoice**——
+實測 Metal 工作集上限 5.33 GiB、VV 權重 5.32 GiB，超過是直接報 buffer 錯不是變慢。
+
+```bash
+bash "${SUBTITLE_DIR}/cloud_asr.sh" "<影片或音檔>" "${VIDEO_DIR}" "<basename>" zh \
+    --vv --json --terms "${TERMS}" --terms-max 50
+```
+
+產出 `<basename>_vibevoice.json`（Step 2b 吃這個）與 `_vibevoice.srt`。
+
+- **輸入可以直接餵影片**，不用先抽 wav——腳本會自己正規化成 16 kHz 單聲道，
+  而且**是在開機器之前**做（避免 GPU 空轉計費）
+- **超過 60 分鐘會自動切段**（模型單次上限 60 分鐘），109 分鐘實測切 3 片、
+  時間軸單調遞增、切點無重疊、涵蓋完整
+- 輸出**無條件轉繁體**（`s2twp`）。VV 的字形不穩定，帶不帶 prompt 都可能出簡體
+- 109 分鐘實測：1 台機器、443 段、1035 秒、**US$0.21**、RTF 0.122
+- 預算緊時用 `MAX_POD_ATTEMPTS=1`（壞機器就停，不換）
 
 **短音檔（≤ 55 分鐘）— 直接跑：**
 
