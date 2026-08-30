@@ -93,10 +93,16 @@ def test_vv_mode_also_normalizes_before_pod(tmp_path: Path) -> None:
     norm = log.find("normalizing input audio")
     pod = log.find("creating RunPod pod")
     assert norm != -1, f"--vv 路徑沒有跑正規化：\n{log[-1500:]}"
-    if pod != -1:
-        assert norm < pod, (
-            "--vv 的開 pod 發生在正規化之前：\n" + log[-1500:]
-        )
+    # ⚠️ 這行不可以寫成 `if pod != -1:`。
+    # 那樣寫的話，只要「creating RunPod pod」從來沒出現，測試就無聲通過——
+    # 而「沒開 pod」本身就代表這條路徑沒走完，測試等於什麼都沒驗。
+    # 守衛的失效方向必須是「擋下」不是「放行」。（pi 靜態審查指出）
+    assert pod != -1, (
+        f"--vv 路徑沒有走到開 pod，這條測試等於沒驗到順序：\n{log[-1500:]}"
+    )
+    assert norm < pod, (
+        "--vv 的開 pod 發生在正規化之前：\n" + log[-1500:]
+    )
 
 
 def test_only_one_ffmpeg_flac_call_in_the_whole_file() -> None:
