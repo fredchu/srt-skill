@@ -410,6 +410,19 @@ runpod_rest_request() {
         fi
     fi
 
+    # DELETE 收到 404 代表「那台已經不在了」——那正是我們要的結果，不是失敗。
+    #
+    # 這不是理論情境：2026-08-30 全片那跑，外部的 runpod_reap.sh 先砍掉機器，
+    # 腳本自己的 cleanup 隨後 DELETE 收到 404，被記成 `terminate result=failure`，
+    # 於是保留了暫存目錄、回傳非零。**機器明明已經清乾淨了，卻報清理失敗。**
+    #
+    # 而 runpod_reap.sh 是 v1.8.0 才放進 repo 的，所以這個交互是我們自己造出來的：
+    # 任何人照文件設排程跑收屍工具，都會撞到。
+    if [[ "$method" == "DELETE" && "$http_code" == "404" && "$path" == /pods/* ]]; then
+        info "pod already absent (HTTP 404 on DELETE $path) — treating as terminated"
+        return 0
+    fi
+
     if [[ ! "$http_code" =~ ^2 ]]; then
         body="$(tr -d '\r\n' <"$response_file" || true)"
         case "$mode" in
