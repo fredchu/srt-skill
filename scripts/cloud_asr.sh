@@ -1543,7 +1543,6 @@ run_vv_mode() {
     fi
     check_cost_cap
 
-    LOCAL_FLAC_PATH="${TMP_DIR}/${BASENAME}.flac"
     LOCAL_JSON_PATH="${TMP_DIR}/${BASENAME}.vv.raw.json"
     LOCAL_SRT_PATH="${OUTPUT_DIR}/${BASENAME}_vibevoice.srt"
     local LOCAL_VV_JSON_PATH="${TMP_DIR}/${BASENAME}_vibevoice.json"
@@ -1551,8 +1550,7 @@ run_vv_mode() {
         LOCAL_VV_JSON_PATH="${OUTPUT_DIR}/${BASENAME}_vibevoice.json"
     fi
 
-    info "converting input WAV to FLAC"
-    ffmpeg -y -i "$WAV_PATH" -ar 16000 -ac 1 -c:a flac -compression_level 12 "$LOCAL_FLAC_PATH" >/dev/null 2>&1
+    # LOCAL_FLAC_PATH 已在模式分流之前產生，這裡不再轉。
     check_cost_cap
 
     info "preparing remote directories on root@$POD_IP -p $POD_PORT"
@@ -1925,16 +1923,25 @@ POD_ATTEMPTS_FILE="$OUTPUT_DIR/env/pod_attempts.txt"
 : >"$POD_ATTEMPTS_FILE"
 trap cleanup EXIT INT TERM HUP QUIT
 
+# ⚠️ **正規化在這裡，在模式分流之前，兩個模式共用這一次。**
+#
+# 2026-08-30 的教訓：第一版只把它接在 Breeze 主流程的 create_pod 之前，
+# VV 模式有自己的一份舊 ffmpeg（沒有 -vn），於是 --vj 那條路徑完全沒吃到修法。
+# 我對著檔案逐條確認過四項修法，但**確認的是檔案內容不是執行路徑**——
+# 那條路根本沒走到。白燒 US$0.22。
+#
+# 這是我們自己寫的「一律正規化、不分支」那條規則的第一個違反案例。
+# 規則寫在註解裡擋不住，所以測試裡加了靜態斷言：整份檔案只准有一處
+# `ffmpeg ... -c:a flac`（見 test_cloud_asr_normalize_before_pod.py）。
+LOCAL_FLAC_PATH="${TMP_DIR}/${BASENAME}.flac"
+normalize_input_audio "$WAV_PATH" "$LOCAL_FLAC_PATH"
+
 if [[ "$ASR_MODE" == "vv" ]]; then
     run_vv_mode
     exit $?
 fi
 
 info "budget cap: ${COST_CAP_USD} USD (~${COST_CAP_SECONDS}s at ~${RUNPOD_ESTIMATED_RATE_PER_HR}/hr)"
-
-# ⚠️ 正規化必須在這裡，不能在開 pod 之後。見 normalize_input_audio 的說明。
-LOCAL_FLAC_PATH="${TMP_DIR}/${BASENAME}.flac"
-normalize_input_audio "$WAV_PATH" "$LOCAL_FLAC_PATH"
 
 ATTEMPT=0
 while :; do
