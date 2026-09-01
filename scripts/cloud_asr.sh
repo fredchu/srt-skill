@@ -1697,11 +1697,7 @@ run_vv_mode() {
     fi
 
     mkdir -p "$OUTPUT_DIR/env"
-    for evidence_path in "$OUTPUT_DIR/env/vv_env.json" "$OUTPUT_DIR/env/pod_id.txt" "$OUTPUT_DIR/env/nvidia-smi.txt" "$OUTPUT_DIR/env/pip_list.txt" "$OUTPUT_DIR/env/terms_sent.txt"; do
-        if [[ -e "$evidence_path" ]]; then
-            die "refusing to overwrite existing evidence file: $evidence_path"
-        fi
-    done
+    # 拒覆蓋檢查已移到開機前（見 assert_no_existing_evidence），這裡不重複。
     info "downloading pod evidence from pod $POD_ID"
     if scp_download "$POD_IP" "$POD_PORT" "${REMOTE_OUTPUT_DIR}/env/vv_env.json" "$OUTPUT_DIR/env/vv_env.json"; then
         :
@@ -1756,7 +1752,10 @@ run_vv_mode() {
         fi
         die "VV ASR failed on pod $POD_ID (exit $status)"
     fi
-    check_cost_cap
+    # ⚠️ 這裡刻意不呼叫 check_cost_cap。ASR 已經跑完、結果還在機器上，
+    # 此時超線會 die → cleanup 砍機 → 剛付錢算完的結果隨機器蒸發。
+    # 下載之後仍有一個 check_cost_cap，超支照樣擋得住，只是晚一個步驟。
+    # 這個危險 2026-08-29 的 review-38 就記錄過，當時只調高上限沒改碼。
 
     info "downloading raw JSON from pod $POD_ID"
     if scp_download "$POD_IP" "$POD_PORT" "$REMOTE_JSON_PATH" "$LOCAL_JSON_PATH"; then
@@ -2039,6 +2038,25 @@ POD_ATTEMPTS_FILE="$OUTPUT_DIR/env/pod_attempts.txt"
 : >"$POD_ATTEMPTS_FILE"
 trap cleanup EXIT INT TERM HUP QUIT
 
+# 證據檔拒覆蓋：純本機條件，只看 OUTPUT_DIR 與 ASR_MODE，開機前就知道答案。
+# 原本擺在「開機＋裝套件＋跑完 ASR」之後，重跑同一支影片會白燒一次開機才 die。
+# 搬到這裡不留副本——留副本等於同一個判斷有兩個真相源。
+assert_no_existing_evidence() {
+    local -a names
+    if [[ "$ASR_MODE" == "vv" ]]; then
+        names=(vv_env.json pod_id.txt nvidia-smi.txt pip_list.txt terms_sent.txt)
+    else
+        names=(nvidia-smi.txt pod_id.txt prompt_sent.txt asr_request.json)
+    fi
+    local n
+    for n in "${names[@]}"; do
+        if [[ -e "$OUTPUT_DIR/env/$n" ]]; then
+            die "refusing to overwrite existing evidence file: $OUTPUT_DIR/env/$n"
+        fi
+    done
+}
+assert_no_existing_evidence
+
 # ⚠️ **正規化在這裡，在模式分流之前，兩個模式共用這一次。**
 #
 # 2026-08-30 的教訓：第一版只把它接在 Breeze 主流程的 create_pod 之前，
@@ -2211,11 +2229,7 @@ else
 fi
 
 mkdir -p "$OUTPUT_DIR/env"
-for evidence_path in "$OUTPUT_DIR/env/nvidia-smi.txt" "$OUTPUT_DIR/env/pod_id.txt" "$OUTPUT_DIR/env/prompt_sent.txt" "$OUTPUT_DIR/env/asr_request.json"; do
-    if [[ -e "$evidence_path" ]]; then
-        die "refusing to overwrite existing evidence file: $evidence_path"
-    fi
-done
+# 拒覆蓋檢查已移到開機前（見 assert_no_existing_evidence），這裡不重複。
 info "downloading pod evidence from pod $POD_ID"
 if scp_download "$POD_IP" "$POD_PORT" "${REMOTE_OUTPUT_DIR}/env/nvidia-smi.txt" "$OUTPUT_DIR/env/nvidia-smi.txt"; then
     :
@@ -2319,7 +2333,10 @@ else
     fi
     die "ASR failed on pod $POD_ID (exit $status)"
 fi
-check_cost_cap
+# ⚠️ 這裡刻意不呼叫 check_cost_cap。ASR 已經跑完、結果還在機器上，
+# 此時超線會 die → cleanup 砍機 → 剛付錢算完的結果隨機器蒸發。
+# 下載之後仍有一個 check_cost_cap，超支照樣擋得住，只是晚一個步驟。
+# 這個危險 2026-08-29 的 review-38 就記錄過，當時只調高上限沒改碼。
 
 info "downloading raw JSON from pod $POD_ID"
 if scp_download "$POD_IP" "$POD_PORT" "$REMOTE_JSON_PATH" "$LOCAL_JSON_PATH"; then
