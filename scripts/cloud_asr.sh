@@ -12,6 +12,13 @@ source "$SCRIPT_DIR/runpod_pod_lib.sh"
 RUNPOD_IMAGE="runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
 RUNPOD_GPU_TYPE_ID="NVIDIA GeForce RTX 4090"
 RUNPOD_CONTAINER_DISK_GB=60
+# SECURE（預設）或 COMMUNITY。社群雲便宜約一半但是個人主機，CUDA 與直連埠都可能不正常；
+# 開機後的驗證會擋，失敗只賠開機那幾分鐘。2026-09-02 起開放試用。
+RUNPOD_CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-SECURE}"
+case "$RUNPOD_CLOUD_TYPE" in
+    SECURE|COMMUNITY) ;;
+    *) printf '[cloud_asr.sh] ERROR: RUNPOD_CLOUD_TYPE must be SECURE or COMMUNITY: %s\n' "$RUNPOD_CLOUD_TYPE" >&2; exit 2 ;;
+esac
 RUNPOD_ESTIMATED_RATE_PER_HR="${RUNPOD_ESTIMATED_RATE_PER_HR:-0.751}"
 # 預算上限。⚠️ 這是【步驟之間】才檢查的軟上限，不是硬上限——
 # check_cost_cap 只在各步驟的交界呼叫，單一步驟跑再久也不會被它中斷。
@@ -170,7 +177,7 @@ Environment:
 Fixed RunPod create payload:
   imageName                ${RUNPOD_IMAGE}
   gpuTypeIds               [${RUNPOD_GPU_TYPE_ID}]
-  cloudType                SECURE
+  cloudType                ${RUNPOD_CLOUD_TYPE}
   gpuCount                 1
   containerDiskInGb        ${RUNPOD_CONTAINER_DISK_GB}
   ports                    [22/tcp]
@@ -351,14 +358,14 @@ load_ssh_public_key() {
 validate_create_pod_payload_file() {
     local payload_file="$1"
 
-    jq -e '
+    jq -e --arg cloud "$RUNPOD_CLOUD_TYPE" '
         type == "object"
         and (.name | type == "string" and length > 0)
         and (.image | type == "string" and length > 0)
         and (.gpu.id == "NVIDIA GeForce RTX 4090")
         and (.gpu.count == 1)
         and (.gpu.minCudaVersion | type == "string" and length > 0)
-        and (.cloud == "SECURE")
+        and (.cloud == $cloud)
         and (.disk == 60)
         and (.ports | type == "array" and length == 1 and .[0] == "22/tcp")
         and (.startSsh == true)
@@ -373,7 +380,8 @@ build_create_pod_payload() {
         --arg name "$pod_name" \
         --arg image "$RUNPOD_IMAGE" \
         --arg mincuda "$RUNPOD_MIN_CUDA" \
-        '{name:$name,image:$image,gpu:{id:"NVIDIA GeForce RTX 4090",count:1,minCudaVersion:$mincuda},cloud:"SECURE",disk:60,ports:["22/tcp"],startSsh:true}' \
+        --arg cloud "$RUNPOD_CLOUD_TYPE" \
+        '{name:$name,image:$image,gpu:{id:"NVIDIA GeForce RTX 4090",count:1,minCudaVersion:$mincuda},cloud:$cloud,disk:60,ports:["22/tcp"],startSsh:true}' \
         >"$payload_file"
     validate_create_pod_payload_file "$payload_file"
 }

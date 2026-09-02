@@ -19,6 +19,10 @@
   回到真的 curl（測試以 mock-key 打到真 API 回 401，18 條紅）。**行為差異只有一處**：清單回查現在會排除 status 含 terminat 的機器
   （bookcast 那邊踩過的坑：剛砍掉的機器可能在清單留一陣子）。
 - bookcast 的 `bin/bookcast_cloud.sh` 同日改為 source 同一個檔（bookcast 0.3.6）。
+- `RUNPOD_CLOUD_TYPE=SECURE|COMMUNITY`（預設 SECURE）。⚠️ **COMMUNITY 在這支腳本還不能用**：
+  它走 v2 REST 開機，沒有「要求公共 IP」欄位，社群雲主機沒有公共 IP 就永遠等不到直連 SSH
+  （09-02 bookcast 實測兩台各等 8 分鐘）。要走社群雲得像 bookcast 0.3.7 那樣改用
+  `runpodctl pod create --public-ip`，尚未做。
 
 ## 1.10.1 - 2026-09-02
 
