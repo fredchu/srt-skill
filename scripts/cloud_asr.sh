@@ -5,7 +5,10 @@ IFS=$'\n\t'
 exec 1>&2
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-RUNPOD_API_BASE="${RUNPOD_API_BASE:-https://api.runpod.io/v2}"
+# 機器生命週期（打 API、讀金鑰、解清單、確認砍機）在共用檔，bookcast 也用同一份。
+# trap、換機重試、費用上限、每次嘗試的紀錄留在這裡——那些是這支腳本自己的契約。
+# shellcheck source=runpod_pod_lib.sh
+source "$SCRIPT_DIR/runpod_pod_lib.sh"
 RUNPOD_IMAGE="runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
 RUNPOD_GPU_TYPE_ID="NVIDIA GeForce RTX 4090"
 RUNPOD_CONTAINER_DISK_GB=60
@@ -187,6 +190,11 @@ die() {
     error "$1"
     exit "${2:-1}"
 }
+
+# 共用檔的三個 log 函式接回這支腳本的格式（帶時間戳的 [cloud_asr.sh] 前綴）。
+runpod_lib_info() { info "$1"; }
+runpod_lib_error() { error "$1"; }
+runpod_lib_die() { die "$1"; }
 
 fail_step() {
     if [[ "${CLOUD_ASR_FAIL_STEP:-}" == "$1" ]]; then
@@ -375,114 +383,25 @@ runpod_rest_request() {
     local method="$2"
     local path="$3"
     local body_file="${4-}"
-    local response_file stderr_file http_code curl_status body curl_err url
 
-    if [[ -n "${CLOUD_ASR_TEST_HOOK:-}" ]]; then
-        local mock_rc
-        mock_runpod_rest_request "$mode" "$method" "$path" "$body_file"
-        mock_rc=$?
-        # 回 44 是 mock 專用的「模擬 HTTP 404」。
-        # 不直接 return，讓它跟真實路徑走同一段 404 判定——
-        # 否則測試測到的是 mock 自己，不是要驗的那段邏輯。
-        if [[ $mock_rc -eq 44 ]]; then
-            http_code=404
-        else
-            return $mock_rc
-        fi
-    else
-
-    response_file="${TMP_DIR}/runpod_${method}_$$.response"
-    stderr_file="${TMP_DIR}/runpod_${method}_$$.stderr"
-    url="${RUNPOD_API_BASE}${path}"
-    : >"$response_file"
-    : >"$stderr_file"
-
-    if [[ -n "$body_file" ]]; then
-        if http_code="$(curl -sS --connect-timeout 20 --max-time 120 \
-            -o "$response_file" -w '%{http_code}' \
-            -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            -H 'Content-Type: application/json' \
-            -X "$method" \
-            --data-binary "@$body_file" \
-            "$url" 2>"$stderr_file")"; then
-            :
-        else
-            curl_status=$?
-            body="$(tr -d '\r\n' <"$response_file" || true)"
-            curl_err="$(tr -d '\r\n' <"$stderr_file" || true)"
-            case "$mode" in
-                fatal)
-                    die "RunPod API request failed (curl exit $curl_status) $method $path: ${body:-<empty>}${curl_err:+; curl: $curl_err}"
-                    ;;
-                nonfatal)
-                    error "RunPod API request failed (curl exit $curl_status) $method $path: ${body:-<empty>}${curl_err:+; curl: $curl_err}"
-                    return 1
-                    ;;
-                quiet)
-                    return 1
-                    ;;
-            esac
-        fi
-    else
-        if http_code="$(curl -sS --connect-timeout 20 --max-time 120 \
-            -o "$response_file" -w '%{http_code}' \
-            -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            -H 'Accept: application/json' \
-            -X "$method" \
-            "$url" 2>"$stderr_file")"; then
-            :
-        else
-            curl_status=$?
-            body="$(tr -d '\r\n' <"$response_file" || true)"
-            curl_err="$(tr -d '\r\n' <"$stderr_file" || true)"
-            case "$mode" in
-                fatal)
-                    die "RunPod API request failed (curl exit $curl_status) $method $path: ${body:-<empty>}${curl_err:+; curl: $curl_err}"
-                    ;;
-                nonfatal)
-                    error "RunPod API request failed (curl exit $curl_status) $method $path: ${body:-<empty>}${curl_err:+; curl: $curl_err}"
-                    return 1
-                    ;;
-                quiet)
-                    return 1
-                    ;;
-            esac
-        fi
-    fi
-
-    fi
-
-    # DELETE 收到 404 代表「那台已經不在了」——那正是我們要的結果，不是失敗。
-    #
-    # 這不是理論情境：2026-08-30 全片那跑，外部的 runpod_reap.sh 先砍掉機器，
-    # 腳本自己的 cleanup 隨後 DELETE 收到 404，被記成 `terminate result=failure`，
-    # 於是保留了暫存目錄、回傳非零。**機器明明已經清乾淨了，卻報清理失敗。**
-    #
-    # 而 runpod_reap.sh 是 v1.8.0 才放進 repo 的，所以這個交互是我們自己造出來的：
-    # 任何人照文件設排程跑收屍工具，都會撞到。
-    if [[ "$method" == "DELETE" && "$http_code" == "404" && "$path" == /pods/* ]]; then
-        info "pod already absent (HTTP 404 on DELETE $path) — treating as terminated"
-        return 0
-    fi
-
-    if [[ ! "$http_code" =~ ^2 ]]; then
-        body="$(tr -d '\r\n' <"$response_file" || true)"
-        case "$mode" in
-            fatal)
-                die "RunPod API HTTP $http_code $method $path: ${body:-<empty>}"
-                ;;
-            nonfatal)
-                error "RunPod API HTTP $http_code $method $path: ${body:-<empty>}"
-                return 1
-                ;;
-            quiet)
-                return 1
-                ;;
-        esac
-    fi
-
-    cat "$response_file"
+    # 一律交給共用檔（含 curl、DELETE 404 視為已砍、非 2xx 判定）。
+    # 測試替身不在這裡切換：這個函式常在 $(...) 子殼裡被呼叫，在子殼裡設的變數
+    # 出了子殼就沒了，砍機那條直接呼叫共用檔的路會回到真的 curl（2026-09-02 實測撞到，
+    # 測試以 mock-key 打到真 API 回 401）。替身在檔案頂層設一次，見 mock 定義之後。
+    runpod_lib_request "$mode" "$method" "$path" "$body_file"
 }
+
+# mock 的簽名是 (mode method path body_file)；共用檔的替身簽名沒有 mode，
+# 從 RUNPOD_LIB_REQUEST_MODE 補回去。mock 回 44 是「模擬 HTTP 404」，
+# 不在這裡處理——讓它跟真實路徑走共用檔同一段 404 判定，測到的才是要驗的邏輯。
+cloud_asr_mock_transport() {
+    mock_runpod_rest_request "$RUNPOD_LIB_REQUEST_MODE" "$@"
+}
+
+# 測試鉤子開著就整支腳本都走 mock，包含 trap 裡的砍機。頂層設一次，不放進任何函式。
+if [[ -n "${CLOUD_ASR_TEST_HOOK:-}" ]]; then
+    RUNPOD_LIB_TRANSPORT=cloud_asr_mock_transport
+fi
 
 # 把任何 ffmpeg 讀得動的輸入正規化成上傳格式（16 kHz 單聲道）。
 #
@@ -653,17 +572,7 @@ create_pod() {
 }
 
 query_pod_record() {
-    local response record
-
-    response="$(runpod_rest_request quiet GET "/pods/$POD_ID")" || return 1
-    record="$(jq -c '
-        if type == "object" and (.runtime? | type == "object") then .
-        elif type == "object" and (.pod? | type == "object") then .pod
-        elif type == "object" and (.data? | type == "object") and (.data.runtime? | type == "object") then .data
-        else empty end
-    ' <<<"$response" 2>/dev/null || true)"
-    [[ -n "$record" ]] || return 1
-    printf '%s\n' "$record"
+    runpod_lib_pod_record "$POD_ID"
 }
 
 get_pod_metadata() {
@@ -674,75 +583,32 @@ get_pod_metadata() {
 }
 
 get_pod_ssh_endpoint() {
-    local record ip port cuda_version data_center_id
+    local record endpoint ip port cuda_version data_center_id
 
     record="$(query_pod_record)"
     [[ -n "$record" ]] || return 1
-    ip="$(jq -r '.ssh.direct.host // ((.runtime.ports // [])[]? | select((.type // "") == "tcp" and ((.private // .privatePort // empty | tostring) == "22")) | (.ip // empty))' <<<"$record" 2>/dev/null | head -n 1)"
-    port="$(jq -r '(.ssh.direct.port // empty | tostring), ((.runtime.ports // [])[]? | select((.type // "") == "tcp" and ((.private // .privatePort // empty | tostring) == "22")) | (.public // .publicPort // empty | tostring))' <<<"$record" 2>/dev/null | grep -v '^$' | head -n 1)"
+    endpoint="$(runpod_lib_ssh_endpoint_from_record "$record")" || return 1
+    IFS=$'\t' read -r ip port <<<"$endpoint"
     cuda_version="$(jq -r '.cudaVersion // "unknown"' <<<"$record" 2>/dev/null)"
     data_center_id="$(jq -r '.dataCenterId // "unknown"' <<<"$record" 2>/dev/null)"
-    if [[ -n "$ip" && -n "$port" && "$ip" != "null" && "$port" != "null" ]]; then
-        printf '%s\t%s\t%s\t%s\n' "$ip" "$port" "$cuda_version" "$data_center_id"
-        return 0
-    fi
-    return 1
+    printf '%s\t%s\t%s\t%s\n' "$ip" "$port" "$cuda_version" "$data_center_id"
 }
 
+# rc 0＝在存活清單裡 / 1＝不在 / 2＝請求失敗。
+# 共用檔會濾掉 status 含 terminat 的（剛砍的機器可能在清單裡留一陣子）。
 pod_present_in_list() {
-    local response
-
-    response="$(runpod_rest_request quiet GET '/pods')" || return 2
-    if jq -e --arg id "$POD_ID" '
-        (if type == "array" then .
-         elif type == "object" and (.pods? | type == "array") then .pods
-         elif type == "object" and (.data? | type == "array") then .data
-         else [] end)
-        | any(.id == $id)
-    ' <<<"$response" >/dev/null 2>&1; then
-        return 0
-    fi
-    return 1
+    runpod_lib_pod_live_in_list "$POD_ID"
 }
 
 terminate_pod_once() {
-    local list_has_pod list_status list_request_failed=false
-    local -a errors=()
-
-    if ! runpod_rest_request nonfatal DELETE "/pods/$POD_ID" >/dev/null; then
-        errors+=("RunPod DELETE /pods/$POD_ID failed")
-    else
-        if pod_present_in_list; then
-            list_has_pod=true
-        else
-            list_status=$?
-            if [[ $list_status -eq 2 ]]; then
-                errors+=("RunPod GET /pods failed after delete")
-                list_request_failed=true
-            else
-                list_has_pod=false
-            fi
-        fi
-        if [[ "$list_request_failed" == false && "${list_has_pod:-false}" == false ]]; then
-            POD_TERMINATED=true
-            info "confirmed RunPod pod id=$POD_ID absent from list after delete"
-            append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=terminate result=success cumulative_billable_seconds=${TOTAL_BILLABLE_SECONDS}"
-            info "terminated RunPod pod id=$POD_ID"
-            return 0
-        fi
-        if [[ "$list_request_failed" == false ]]; then
-            errors+=("RunPod list still contains pod id=$POD_ID after delete")
-        fi
+    if runpod_lib_terminate_pod_once "$POD_ID"; then
+        POD_TERMINATED=true
+        info "confirmed RunPod pod id=$POD_ID absent from list after delete"
+        append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=terminate result=success cumulative_billable_seconds=${TOTAL_BILLABLE_SECONDS}"
+        info "terminated RunPod pod id=$POD_ID"
+        return 0
     fi
-
-    TERMINATE_LAST_ERROR=""
-    local msg
-    for msg in "${errors[@]}"; do
-        if [[ -n "$TERMINATE_LAST_ERROR" ]]; then
-            TERMINATE_LAST_ERROR+=" | "
-        fi
-        TERMINATE_LAST_ERROR+="$msg"
-    done
+    TERMINATE_LAST_ERROR="$RUNPOD_LIB_TERMINATE_LAST_ERROR"
     append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=terminate result=failure cumulative_billable_seconds=${TOTAL_BILLABLE_SECONDS} error=${TERMINATE_LAST_ERROR}"
     return 1
 }
@@ -1986,19 +1852,10 @@ if [[ ! -f "$WAV_PATH" ]]; then
 fi
 
 load_runpod_api_key() {
-    if [[ -n "${RUNPOD_API_KEY:-}" ]]; then
+    if runpod_lib_load_api_key; then
         return 0
     fi
-
-    local api_key_file="$HOME/.config/runpod/api_key"
-    if [[ -r "$api_key_file" ]]; then
-        RUNPOD_API_KEY="$(<"$api_key_file")"
-        if [[ -n "${RUNPOD_API_KEY:-}" ]]; then
-            return 0
-        fi
-    fi
-
-    printf '[cloud_asr.sh] ERROR: %s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "missing RunPod credential: set RUNPOD_API_KEY or create $api_key_file" >&2
+    printf '[cloud_asr.sh] ERROR: %s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "missing RunPod credential: set RUNPOD_API_KEY or create $(runpod_lib_api_key_file_hint)" >&2
     exit 1
 }
 

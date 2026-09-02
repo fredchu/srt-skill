@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.11.0 - 2026-09-02
+
+### 新增
+
+- **`scripts/runpod_pod_lib.sh`：RunPod 機器生命週期共用檔。** 打 API（含 DELETE 404 視為已砍）、
+  讀金鑰、存活清單正規化（拆 `{pods}`/`{data}` 包裝、排除 status 含 terminat 的）、
+  依名字找存活機器、單台紀錄、SSH 端點（`ssh.direct` 優先、退回 `runtime.ports`）、
+  stop/start action、砍機並回查清單。`RUNPOD_LIB_TRANSPORT` 可換掉 curl 當測試替身；
+  `runpod_lib_info/error/die` 由呼叫端重新定義接回自己的 log 格式。**刻意不做**：不擁有
+  POD_ID、不設 trap（bash 每個訊號只有一個 trap 槽）、不開機（payload 兩邊不同）、
+  不管費用上限與紀錄。行為測試 `scripts/tests/test_runpod_pod_lib.py`（14 條）。
+- `cloud_asr.sh` 改為 source 它：`runpod_rest_request`／`query_pod_record`／
+  `get_pod_ssh_endpoint`／`pod_present_in_list`／`terminate_pod_once`／`load_runpod_api_key`
+  都成了薄包裝，mock 透過 `RUNPOD_LIB_TRANSPORT=cloud_asr_mock_transport` 接進共用檔，
+  404 判定仍走同一段。替身切換在檔案頂層設一次——一開始寫在 `runpod_rest_request` 裡，
+  但那個函式常在 `$(...)` 子殼裡被呼叫，設的變數出了子殼就沒了，trap 裡的砍機直接呼叫共用檔時
+  回到真的 curl（測試以 mock-key 打到真 API 回 401，18 條紅）。**行為差異只有一處**：清單回查現在會排除 status 含 terminat 的機器
+  （bookcast 那邊踩過的坑：剛砍掉的機器可能在清單留一陣子）。
+- bookcast 的 `bin/bookcast_cloud.sh` 同日改為 source 同一個檔（bookcast 0.3.6）。
+
 ## 1.10.1 - 2026-09-02
 
 ### 修正
