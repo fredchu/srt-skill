@@ -111,6 +111,9 @@ ${SUBTITLE_DIR}/
   VibeVoice 跨側 **10.6%**、雲端自噪 1.8%（皆為兩側都 `s2twp` 後的口徑）。
   差異是穩定的實質差異不是雜訊，且**不知道哪邊比較對**。要用雲端請先確認用戶知道這件事。
   一支 50 分鐘的影片約 US$0.05-0.15。設定見 `docs/CLOUD-ASR-SETUP.md`。
+  **社群雲**：用戶說「use community runpod」「用社群雲」→ 加 `RUNPOD_CLOUD_TYPE=COMMUNITY`（4090 0.34 美元／小時，
+  安全雲 0.74）。開機走 `runpodctl --public-ip`（需本機裝 runpodctl）。回 `graphql error: no longer any instances`
+  就加 `RUNPOD_GPU_TYPE_ID="NVIDIA GeForce RTX 5090"` 重試一次，再沒有就退回安全雲。
 - **術語表**：預設 `terms_austin_v2.txt`。用戶指定其他講者 → 尋找對應術語表
 - **投影片文字**：用戶提供投影片檔（.txt 純文字，或 .pptx/.ppt PowerPoint）→ 啟用 Step 0.5 抽取本集術語
 - **特殊要求**：`--learn`（術語學習）、`--bilingual`（雙語輸出）

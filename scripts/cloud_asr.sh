@@ -10,10 +10,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=runpod_pod_lib.sh
 source "$SCRIPT_DIR/runpod_pod_lib.sh"
 RUNPOD_IMAGE="runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
-RUNPOD_GPU_TYPE_ID="NVIDIA GeForce RTX 4090"
+RUNPOD_GPU_TYPE_ID="${RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 4090}"
 RUNPOD_CONTAINER_DISK_GB=60
-# SECURE（預設）或 COMMUNITY。社群雲便宜約一半但是個人主機，CUDA 與直連埠都可能不正常；
-# 開機後的驗證會擋，失敗只賠開機那幾分鐘。2026-09-02 起開放試用。
+# SECURE（預設）或 COMMUNITY。社群雲 4090 約便宜一半（0.34 vs 0.74 美元／小時）。
+# 社群雲開機走 runpodctl 帶 --public-ip：v2 REST 沒有「要求公共 IP」的欄位，沒有公共 IP 就
+# 永遠等不到直連 SSH（2026-09-02 bookcast 兩台各等 8 分鐘；帶 --public-ip 的機器 18 秒就有）。
+# 沒有符合規格的機器時 runpodctl 回 graphql error，可用 RUNPOD_GPU_TYPE_ID 換 5090 再試。
 RUNPOD_CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-SECURE}"
 case "$RUNPOD_CLOUD_TYPE" in
     SECURE|COMMUNITY) ;;
@@ -176,8 +178,8 @@ Environment:
 
 Fixed RunPod create payload:
   imageName                ${RUNPOD_IMAGE}
-  gpuTypeIds               [${RUNPOD_GPU_TYPE_ID}]
-  cloudType                ${RUNPOD_CLOUD_TYPE}
+  gpuTypeIds               [${RUNPOD_GPU_TYPE_ID}] (RUNPOD_GPU_TYPE_ID 可覆寫)
+  cloudType                ${RUNPOD_CLOUD_TYPE} (RUNPOD_CLOUD_TYPE=COMMUNITY → runpodctl pod create --public-ip)
   gpuCount                 1
   containerDiskInGb        ${RUNPOD_CONTAINER_DISK_GB}
   ports                    [22/tcp]
@@ -358,11 +360,11 @@ load_ssh_public_key() {
 validate_create_pod_payload_file() {
     local payload_file="$1"
 
-    jq -e --arg cloud "$RUNPOD_CLOUD_TYPE" '
+    jq -e --arg cloud "$RUNPOD_CLOUD_TYPE" --arg gpu "$RUNPOD_GPU_TYPE_ID" '
         type == "object"
         and (.name | type == "string" and length > 0)
         and (.image | type == "string" and length > 0)
-        and (.gpu.id == "NVIDIA GeForce RTX 4090")
+        and (.gpu.id == $gpu)
         and (.gpu.count == 1)
         and (.gpu.minCudaVersion | type == "string" and length > 0)
         and (.cloud == $cloud)
@@ -381,7 +383,8 @@ build_create_pod_payload() {
         --arg image "$RUNPOD_IMAGE" \
         --arg mincuda "$RUNPOD_MIN_CUDA" \
         --arg cloud "$RUNPOD_CLOUD_TYPE" \
-        '{name:$name,image:$image,gpu:{id:"NVIDIA GeForce RTX 4090",count:1,minCudaVersion:$mincuda},cloud:$cloud,disk:60,ports:["22/tcp"],startSsh:true}' \
+        --arg gpu "$RUNPOD_GPU_TYPE_ID" \
+        '{name:$name,image:$image,gpu:{id:$gpu,count:1,minCudaVersion:$mincuda},cloud:$cloud,disk:60,ports:["22/tcp"],startSsh:true}' \
         >"$payload_file"
     validate_create_pod_payload_file "$payload_file"
 }
@@ -564,11 +567,25 @@ create_pod() {
     local pod_name payload_file response
 
     pod_name="cloud-asr-$(date -u +%Y%m%dT%H%M%SZ)-$$-a${ATTEMPT}"
-    payload_file="${TMP_DIR}/create_pod.$$.json"
-    build_create_pod_payload "$pod_name" "$payload_file"
 
-    info "creating RunPod pod name=$pod_name"
-    response="$(runpod_rest_request fatal POST '/pods' "$payload_file")"
+    info "creating RunPod pod name=$pod_name cloud=$RUNPOD_CLOUD_TYPE"
+    if [[ "$RUNPOD_CLOUD_TYPE" == "COMMUNITY" && -z "${CLOUD_ASR_TEST_HOOK:-}" ]]; then
+        # 同一組規格改由 runpodctl 送（走 GraphQL），差別只有 --public-ip；
+        # 公鑰改用 env PUBLIC_KEY 交給官方映像的 sshd（runpodctl 沒有 startSsh 旗標）。
+        # runpodctl 失敗印 {"error":…} 並回非 0，這裡跟 REST 的 fatal 一樣直接 die。
+        if ! response="$(RUNPOD_API_KEY="$RUNPOD_API_KEY" runpodctl pod create \
+                --name "$pod_name" --cloud-type COMMUNITY --public-ip \
+                --gpu-id "$RUNPOD_GPU_TYPE_ID" --min-cuda-version "$RUNPOD_MIN_CUDA" \
+                --image "$RUNPOD_IMAGE" --container-disk-in-gb "$RUNPOD_CONTAINER_DISK_GB" \
+                --ports "22/tcp" \
+                --env "$(jq -n --arg key "$(<"$SSH_PUBLIC_KEY_PATH")" '{PUBLIC_KEY:$key}')" 2>&1)"; then
+            die "RunPod pod creation via runpodctl failed: $(tr -d '\n' <<<"$response")"
+        fi
+    else
+        payload_file="${TMP_DIR}/create_pod.$$.json"
+        build_create_pod_payload "$pod_name" "$payload_file"
+        response="$(runpod_rest_request fatal POST '/pods' "$payload_file")"
+    fi
     POD_ID="$(jq -r '.id // .pod.id // empty' <<<"$response" 2>/dev/null || true)"
     if [[ -z "$POD_ID" || "$POD_ID" == "null" ]]; then
         die "RunPod pod creation failed: missing response.id"
@@ -1875,6 +1892,9 @@ if [[ -z "$BASENAME" || "$BASENAME" == */* ]]; then
 fi
 
 require_cmd curl
+if [[ "$RUNPOD_CLOUD_TYPE" == "COMMUNITY" ]]; then
+    require_cmd runpodctl
+fi
 require_cmd jq
 require_cmd ssh
 require_cmd scp

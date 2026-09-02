@@ -19,10 +19,13 @@
   回到真的 curl（測試以 mock-key 打到真 API 回 401，18 條紅）。**行為差異只有一處**：清單回查現在會排除 status 含 terminat 的機器
   （bookcast 那邊踩過的坑：剛砍掉的機器可能在清單留一陣子）。
 - bookcast 的 `bin/bookcast_cloud.sh` 同日改為 source 同一個檔（bookcast 0.3.6）。
-- `RUNPOD_CLOUD_TYPE=SECURE|COMMUNITY`（預設 SECURE）。⚠️ **COMMUNITY 在這支腳本還不能用**：
-  它走 v2 REST 開機，沒有「要求公共 IP」欄位，社群雲主機沒有公共 IP 就永遠等不到直連 SSH
-  （09-02 bookcast 實測兩台各等 8 分鐘）。要走社群雲得像 bookcast 0.3.7 那樣改用
-  `runpodctl pod create --public-ip`，尚未做。
+- `RUNPOD_CLOUD_TYPE=SECURE|COMMUNITY`（預設 SECURE）與 `RUNPOD_GPU_TYPE_ID`（預設 4090）。
+  社群雲開機改走 `runpodctl pod create --public-ip`：v2 REST 沒有「要求公共 IP」的欄位，
+  沒有公共 IP 就永遠等不到直連 SSH（09-02 bookcast 兩台各等 8 分鐘；帶 `--public-ip` 的機器 18 秒就有）。
+  公鑰改由 env `PUBLIC_KEY` 交給官方映像的 sshd（runpodctl 沒有 startSsh）。其餘流程、費用上限、
+  砍機回查全部不變；測試鉤子開著時仍走 mock REST。社群雲 4090 常沒貨（要同時有公共 IP 與 CUDA ≥ 12.8），
+  `RUNPOD_GPU_TYPE_ID="NVIDIA GeForce RTX 5090"` 可換型號（0.69 美元／小時，仍低於安全雲 4090 的 0.74）。
+  需本機 `runpodctl`（`brew install runpod/runpodctl/runpodctl`），只在 COMMUNITY 才檢查。
 
 ## 1.10.1 - 2026-09-02
 
