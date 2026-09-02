@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.10.1 - 2026-09-02
+
+### 修正
+
+- **`subtitle.sh --engine=runpod` 不帶 `--breeze` 時改送 `--largev3`（含 initial prompt）。**
+  之前雲端分流只在 Breeze／turbo 時設旗標，large-v3 送出去是空的，cloud_asr.sh
+  以「missing model flag」拒收。SKILL.md 據此寫成「雲端只支援 Breeze」——那是 subtitle.sh
+  沒接，不是雲端不支援（1.10.0 的 `--largev3` 一直只有 `hallucination_fallback.sh` 在用）。
+  SKILL.md 同步改寫。speech-to-prose 的 RunPod 路徑靠這條走英文分支。
+
 ## 1.10.0 - 2026-08-30
 
 > **四條 ASR 路徑全部上雲，四條全部 live 驗證通過。**

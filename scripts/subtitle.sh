@@ -331,15 +331,18 @@ if [ "$ASR_ENGINE" = "runpod" ]; then
     # 雲端分流。cloud_asr.sh 是 drop-in 替代品：同樣的 wav 進去、
     # 同樣的 ${DIR}/${BASENAME}.srt 出來，所以底下的檔名 fallback 與
     # strict 驗證完全不用改。憑證走環境變數 RUNPOD_API_KEY，不落檔。
-    ENGINE_FLAG=""
-    [ "$USE_BREEZE" = true ] && ENGINE_FLAG="--breeze"
-    [ "$USE_TURBO" = true ] && ENGINE_FLAG="--turbo"
+    # 三種模式都要送旗標：cloud_asr.sh 不帶旗標會直接拒收（1.10.0 前 large-v3
+    # 就是卡在這裡沒送，不是雲端不支援）。--turbo 仍會被雲端拒絕，讓它自己報。
+    ENGINE_FLAGS=(--largev3)
+    [ -n "$INITIAL_PROMPT" ] && ENGINE_FLAGS+=(--initial-prompt "$INITIAL_PROMPT")
+    [ "$USE_BREEZE" = true ] && ENGINE_FLAGS=(--breeze)
+    [ "$USE_TURBO" = true ] && ENGINE_FLAGS=(--turbo)
     CLOUD_ASR="$(dirname "${BASH_SOURCE[0]}")/cloud_asr.sh"
     if [ ! -x "$CLOUD_ASR" ]; then
         print_error "找不到可執行的 cloud_asr.sh：$CLOUD_ASR"
         rm -f "$MLX_MARKER"; exit 1
     fi
-    "$CLOUD_ASR" "$WAV_FILE" "$DIR" "$BASENAME" "$LANGUAGE" $ENGINE_FLAG 2>&1 | tee "$MLX_STDOUT_LOG"
+    "$CLOUD_ASR" "$WAV_FILE" "$DIR" "$BASENAME" "$LANGUAGE" "${ENGINE_FLAGS[@]}" 2>&1 | tee "$MLX_STDOUT_LOG"
 else
     mlx_whisper "${MLX_WHISPER_ARGS[@]}" "$WAV_FILE" 2>&1 | tee "$MLX_STDOUT_LOG"
 fi

@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.10.0
+version: 1.10.1
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -104,7 +104,9 @@ ${SUBTITLE_DIR}/
 - **ASR 模式**：預設 Breeze（`--breeze`）。用戶提到 whisper / 英文內容 / 非中文 → 用 Whisper（不加 `--breeze`）
 - **ASR 引擎**：**預設 `mlx`（本地 Apple Silicon）**。用戶提到「用 runpod」「跑雲端」「M1 Max 不在」→ `--engine=runpod`
   （也可用 `SRT_ASR_ENGINE` 環境變數）。
-  ⚠️ **Step 1 的雲端只支援 `--breeze`**，`--turbo` 與不帶旗標的 large-v3 都會直接報錯。
+  雲端接 `--breeze` 與不帶旗標的 large-v3（1.10.1 起 subtitle.sh 會送 `--largev3`；
+  之前沒送旗標才被拒，不是雲端不支援）；`--turbo` 雲端仍直接報錯。
+  large-v3 雲端跑的是 faster-whisper CT2 FP16，正常語音段與本地位元組級相同（n=1 clip，見 CHANGELOG 1.10.0）。
   ⚠️ **雲端輸出與本地不等價**：Breeze 跨側文字差 2.07%（兩邊各自跑兩次都逐位元組相同）、
   VibeVoice 跨側 **10.6%**、雲端自噪 1.8%（皆為兩側都 `s2twp` 後的口徑）。
   差異是穩定的實質差異不是雜訊，且**不知道哪邊比較對**。要用雲端請先確認用戶知道這件事。
