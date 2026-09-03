@@ -9,6 +9,37 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # trap、換機重試、費用上限、每次嘗試的紀錄留在這裡——那些是這支腳本自己的契約。
 # shellcheck source=runpod_pod_lib.sh
 source "$SCRIPT_DIR/runpod_pod_lib.sh"
+# 平台：runpod（預設）或 vast。兩邊只差「開機、查紀錄、SSH 位置、存活清單、砍機」，
+# 收在下方 provider 分岔；換機重試、費用上限、trap、證據檔全部共用（2026-09-03 接上，
+# 跟 bookcast 0.3.8 同一套；踩過的坑見 vast_instance_lib.sh 與 CHANGELOG 1.12.0）。
+CLOUD_ASR_PROVIDER="${CLOUD_ASR_PROVIDER:-runpod}"
+case "$CLOUD_ASR_PROVIDER" in
+    runpod|vast) ;;
+    *) printf '[cloud_asr.sh] ERROR: CLOUD_ASR_PROVIDER must be runpod or vast: %s\n' "$CLOUD_ASR_PROVIDER" >&2; exit 2 ;;
+esac
+CLOUD_ASR_DEFAULT_RATE_PER_HR=0.751
+if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+    # shellcheck source=vast_instance_lib.sh
+    source "$SCRIPT_DIR/vast_instance_lib.sh"
+    # 沒有「給我一張 X 卡」的開機法：先搜報價（便宜在前）再逐張開，被搶就換下一張。
+    VAST_GPU="${VAST_GPU:-RTX 5090}"
+    VAST_MAX_DPH="${VAST_MAX_DPH:-0.6}"
+    VAST_GEO_EXCLUDE="${VAST_GEO_EXCLUDE-CN,VN}"
+    # 137.175.、207.246.98.、144.202.115.：IP 註冊在美國、機器在中國，拉不到 Docker Hub（09-03 bookcast 五次試跑）
+    VAST_IP_EXCLUDE="${VAST_IP_EXCLUDE-137.175.,207.246.98.,144.202.115.}"
+    VAST_EXTRA_QUERY="${VAST_EXTRA_QUERY-}"
+    VAST_MAX_OFFER_TRIES="${VAST_MAX_OFFER_TRIES:-3}"
+    # Vast 自家映像（6.4 GB、主機常有快取；py312＋torch 2.8＋cu128 與 RunPod 那個對齊）
+    VAST_IMAGE="${VAST_IMAGE:-vastai/pytorch:2.8.0-cu128-cuda-12.9-mini-py312-2026-09-01}"
+    VAST_DISK_GB="${VAST_DISK_GB:-60}"
+    # Python 在 /venv/main 虛擬環境，非互動 SSH 看不到 → 每條遠端指令先 activate（輸出要丟掉，它會印歡迎行）
+    VAST_VENV="${VAST_VENV-/venv/main}"
+    # 跳板位置在容器起來前就有，sshd 要等映像拉完；先等 running 再數 SSH 視窗。
+    # 拉映像訊息 STALL 分鐘沒變＝這台主機連不到映像來源，當成「直連沒生成」換一台。
+    VAST_BOOT_WAIT_MIN="${VAST_BOOT_WAIT_MIN:-20}"
+    VAST_BOOT_STALL_MIN="${VAST_BOOT_STALL_MIN:-5}"
+    CLOUD_ASR_DEFAULT_RATE_PER_HR=0.45
+fi
 RUNPOD_IMAGE="runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
 RUNPOD_GPU_TYPE_ID="${RUNPOD_GPU_TYPE_ID:-NVIDIA GeForce RTX 4090}"
 RUNPOD_CONTAINER_DISK_GB=60
@@ -21,7 +52,7 @@ case "$RUNPOD_CLOUD_TYPE" in
     SECURE|COMMUNITY) ;;
     *) printf '[cloud_asr.sh] ERROR: RUNPOD_CLOUD_TYPE must be SECURE or COMMUNITY: %s\n' "$RUNPOD_CLOUD_TYPE" >&2; exit 2 ;;
 esac
-RUNPOD_ESTIMATED_RATE_PER_HR="${RUNPOD_ESTIMATED_RATE_PER_HR:-0.751}"
+RUNPOD_ESTIMATED_RATE_PER_HR="${RUNPOD_ESTIMATED_RATE_PER_HR:-$CLOUD_ASR_DEFAULT_RATE_PER_HR}"
 # 預算上限。⚠️ 這是【步驟之間】才檢查的軟上限，不是硬上限——
 # check_cost_cap 只在各步驟的交界呼叫，單一步驟跑再久也不會被它中斷。
 # 所以實際花費最多會超出上限「一個步驟」的量。
@@ -175,6 +206,11 @@ Environment:
   CLOUD_VV_FAIL_STEP       Optional VV fault injection hook; set to inference to fail before remote generate.
   CLOUD_ASR_TEST_HOOK      Mock hook: provisioning_retry, delete_failure, signal_cleanup.
   COST_CAP_USD             Override per-call budget cap (default: ${COST_CAP_USD}).
+  CLOUD_ASR_PROVIDER       runpod (default) or vast.
+  VAST_API_KEY             Vast.ai key (or ~/.config/vastai/vast_api_key). vastai CLI required.
+  VAST_GPU / VAST_MAX_DPH  Offer filter for vast (default: RTX 5090, 0.6 USD/h cap).
+  VAST_GEO_EXCLUDE / VAST_IP_EXCLUDE / VAST_EXTRA_QUERY / VAST_MAX_OFFER_TRIES / VAST_IMAGE / VAST_DISK_GB / VAST_VENV
+  VAST_BOOT_WAIT_MIN / VAST_BOOT_STALL_MIN  Image-load budget and stall detector (default 20 / 5 min).
 
 Fixed RunPod create payload:
   imageName                ${RUNPOD_IMAGE}
@@ -204,6 +240,9 @@ die() {
 runpod_lib_info() { info "$1"; }
 runpod_lib_error() { error "$1"; }
 runpod_lib_die() { die "$1"; }
+vast_lib_info() { info "$1"; }
+vast_lib_error() { error "$1"; }
+vast_lib_die() { die "$1"; }
 
 fail_step() {
     if [[ "${CLOUD_ASR_FAIL_STEP:-}" == "$1" ]]; then
@@ -563,10 +602,41 @@ mock_runpod_rest_request() {
     esac
 }
 
+# Vast：搜報價、逐張開；報價被搶是常態不是錯。成功後 POD_ID＝instance id。
+create_instance_vast() {
+    local label="$1"
+    local rows tries=0 offer_id offer_desc out
+    info "searching Vast.ai offers gpu=$VAST_GPU cap=${VAST_MAX_DPH}USD/h disk=${VAST_DISK_GB}GB image=$VAST_IMAGE"
+    rows="$(vast_lib_pick_offers "$VAST_GPU" "$VAST_DISK_GB" "$VAST_MAX_DPH" "$VAST_GEO_EXCLUDE" "$VAST_EXTRA_QUERY" "$VAST_IP_EXCLUDE")" \
+        || die "no Vast.ai offer matches (gpu=$VAST_GPU cap=${VAST_MAX_DPH} geo_exclude=${VAST_GEO_EXCLUDE:-none} ip_exclude=${VAST_IP_EXCLUDE:-none}); relax VAST_MAX_DPH or change VAST_GPU"
+    while IFS=$'\t' read -r offer_id offer_desc; do
+        [[ -n "$offer_id" ]] || continue
+        tries=$((tries + 1))
+        (( tries <= VAST_MAX_OFFER_TRIES )) || break
+        info "trying Vast.ai offer $offer_id (${tries}/${VAST_MAX_OFFER_TRIES}): $offer_desc"
+        if out="$(vast_lib_create_instance "$offer_id" "$VAST_IMAGE" "$VAST_DISK_GB" "$label")"; then
+            POD_ID="$out"
+            return 0
+        fi
+        info "offer $offer_id could not be rented (${out:-<empty>}); trying next"
+        append_pod_attempt_log "attempt=${ATTEMPT} offer=${offer_id} action=create result=offer_failed error=$(tr -d '\n' <<<"${out:-<empty>}")"
+    done <<<"$rows"
+    die "Vast.ai instance creation failed after ${tries} offer(s)"
+}
+
 create_pod() {
     local pod_name payload_file response
 
     pod_name="cloud-asr-$(date -u +%Y%m%dT%H%M%SZ)-$$-a${ATTEMPT}"
+
+    if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+        create_instance_vast "$pod_name"
+        POD_NAME="$pod_name"
+        POD_TERMINATED=false
+        append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} pod_name=${POD_NAME} action=create result=success"
+        info "created Vast.ai instance id=$POD_ID label=$POD_NAME"
+        return 0
+    fi
 
     info "creating RunPod pod name=$pod_name cloud=$RUNPOD_CLOUD_TYPE"
     if [[ "$RUNPOD_CLOUD_TYPE" == "COMMUNITY" && -z "${CLOUD_ASR_TEST_HOOK:-}" ]]; then
@@ -597,14 +667,23 @@ create_pod() {
 }
 
 query_pod_record() {
-    runpod_lib_pod_record "$POD_ID"
+    if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+        vast_lib_instance_record "$POD_ID"
+    else
+        runpod_lib_pod_record "$POD_ID"
+    fi
 }
 
+# 兩欄：CUDA 版本、資料中心（Vast 沒有資料中心欄位，用 geolocation 頂）
 get_pod_metadata() {
     local record
 
     record="$(query_pod_record)" || return 1
-    jq -r '[.cudaVersion // "unknown", .dataCenterId // "unknown"] | @tsv' <<<"$record" 2>/dev/null
+    if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+        jq -r '[(.cuda_max_good // "unknown" | tostring), (.geolocation // "unknown")] | @tsv' <<<"$record" 2>/dev/null
+    else
+        jq -r '[.cudaVersion // "unknown", .dataCenterId // "unknown"] | @tsv' <<<"$record" 2>/dev/null
+    fi
 }
 
 get_pod_ssh_endpoint() {
@@ -612,28 +691,86 @@ get_pod_ssh_endpoint() {
 
     record="$(query_pod_record)"
     [[ -n "$record" ]] || return 1
-    endpoint="$(runpod_lib_ssh_endpoint_from_record "$record")" || return 1
+    if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+        endpoint="$(vast_lib_ssh_endpoint_from_record "$record")" || return 1
+        cuda_version="$(jq -r '.cuda_max_good // "unknown" | tostring' <<<"$record" 2>/dev/null)"
+        data_center_id="$(jq -r '.geolocation // "unknown"' <<<"$record" 2>/dev/null)"
+    else
+        endpoint="$(runpod_lib_ssh_endpoint_from_record "$record")" || return 1
+        cuda_version="$(jq -r '.cudaVersion // "unknown"' <<<"$record" 2>/dev/null)"
+        data_center_id="$(jq -r '.dataCenterId // "unknown"' <<<"$record" 2>/dev/null)"
+    fi
     IFS=$'\t' read -r ip port <<<"$endpoint"
-    cuda_version="$(jq -r '.cudaVersion // "unknown"' <<<"$record" 2>/dev/null)"
-    data_center_id="$(jq -r '.dataCenterId // "unknown"' <<<"$record" 2>/dev/null)"
     printf '%s\t%s\t%s\t%s\n' "$ip" "$port" "$cuda_version" "$data_center_id"
 }
 
 # rc 0＝在存活清單裡 / 1＝不在 / 2＝請求失敗。
 # 共用檔會濾掉 status 含 terminat 的（剛砍的機器可能在清單裡留一陣子）。
 pod_present_in_list() {
-    runpod_lib_pod_live_in_list "$POD_ID"
+    if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+        vast_lib_instance_live_in_list "$POD_ID"
+    else
+        runpod_lib_pod_live_in_list "$POD_ID"
+    fi
+}
+
+provider_terminate_once() {
+    local rc=0
+    if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+        vast_lib_terminate_instance_once "$POD_ID" || rc=$?
+        TERMINATE_LAST_ERROR="$VAST_LIB_TERMINATE_LAST_ERROR"
+    else
+        runpod_lib_terminate_pod_once "$POD_ID" || rc=$?
+        TERMINATE_LAST_ERROR="$RUNPOD_LIB_TERMINATE_LAST_ERROR"
+    fi
+    return "$rc"
+}
+
+# Vast 專用：等 actual_status=running。rc 0＝好了；rc 124＝這台起不來（死狀態／拉映像停滯／超過預算），
+# 呼叫端把它當成「直連沒生成」砍掉換一台——這比 bookcast 直接 die 好，換機迴圈本來就在。
+wait_for_instance_running() {
+    [[ "$CLOUD_ASR_PROVIDER" == "vast" ]] || return 0
+    local start now status msg last_msg="" stall_since
+    start="$(date +%s)"; stall_since="$start"
+    while :; do
+        now="$(date +%s)"
+        status="$(vast_lib_instance_status "$POD_ID" 2>/dev/null || echo "?")"
+        if [[ "$status" == "running" ]]; then
+            append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=boot_wait result=running elapsed=$((now - start))s"
+            return 0
+        fi
+        if vast_lib_status_is_dead "$status"; then
+            error "Vast.ai instance $POD_ID is in terminal status '$status'; it will never reach running"
+            append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=boot_wait result=dead status=${status} elapsed=$((now - start))s"
+            return 124
+        fi
+        msg="$(vast_lib_instance_status_msg "$POD_ID" 2>/dev/null || echo "")"
+        if [[ "$msg" != "$last_msg" ]]; then
+            last_msg="$msg"; stall_since="$now"
+        elif [[ "$status" == "loading" && $(( now - stall_since )) -ge $(( VAST_BOOT_STALL_MIN * 60 )) ]]; then
+            error "Vast.ai instance $POD_ID image pull made no progress for ${VAST_BOOT_STALL_MIN} min (last: $(tr -d '\n' <<<"$msg" | cut -c1-80)); host cannot fetch the image"
+            append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=boot_wait result=stalled elapsed=$((now - start))s"
+            return 124
+        fi
+        if (( now - start >= VAST_BOOT_WAIT_MIN * 60 )); then
+            error "Vast.ai instance $POD_ID not running after ${VAST_BOOT_WAIT_MIN} min (status=${status})"
+            append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=boot_wait result=timeout status=${status} elapsed=$((now - start))s"
+            return 124
+        fi
+        info "Vast.ai instance $POD_ID status=${status}; waiting for image load"
+        check_cost_cap
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
 }
 
 terminate_pod_once() {
-    if runpod_lib_terminate_pod_once "$POD_ID"; then
+    if provider_terminate_once; then
         POD_TERMINATED=true
         info "confirmed RunPod pod id=$POD_ID absent from list after delete"
         append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=terminate result=success cumulative_billable_seconds=${TOTAL_BILLABLE_SECONDS}"
         info "terminated RunPod pod id=$POD_ID"
         return 0
     fi
-    TERMINATE_LAST_ERROR="$RUNPOD_LIB_TERMINATE_LAST_ERROR"
     append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=terminate result=failure cumulative_billable_seconds=${TOTAL_BILLABLE_SECONDS} error=${TERMINATE_LAST_ERROR}"
     return 1
 }
@@ -668,7 +805,11 @@ terminate_pod() {
 handle_ssh_auth_failure() {
     local host="$1"
     local port="$2"
-    error "Permission denied (publickey) when connecting to root@$host -p $port. Register the account-level SSH public key in https://console.runpod.io/user/settings and ensure $SSH_PRIVATE_KEY.pub is uploaded."
+    if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+        error "Permission denied (publickey) when connecting to root@$host -p $port. Register the key on Vast.ai: vastai create ssh-key \"\$(cat $SSH_PUBLIC_KEY_PATH)\""
+    else
+        error "Permission denied (publickey) when connecting to root@$host -p $port. Register the account-level SSH public key in https://console.runpod.io/user/settings and ensure $SSH_PRIVATE_KEY.pub is uploaded."
+    fi
 }
 
 ssh_probe_ready() {
@@ -721,7 +862,12 @@ ssh_run_script() {
         esac
     fi
 
-    if maybe_timeout "$SSH_COMMAND_TIMEOUT_SECONDS" ssh "${SSH_BASE_OPTS[@]}" -p "$port" "root@$host" 'bash -se' <"$script_file" >"$log_file" 2>&1; then
+    # Vast 映像的 Python 在虛擬環境，非互動 SSH 看不到；activate 會印歡迎行，輸出要丟掉。
+    local remote_shell='bash -se'
+    if [[ "$CLOUD_ASR_PROVIDER" == "vast" && -n "$VAST_VENV" ]]; then
+        remote_shell=". ${VAST_VENV}/bin/activate >/dev/null 2>&1; bash -se"
+    fi
+    if maybe_timeout "$SSH_COMMAND_TIMEOUT_SECONDS" ssh "${SSH_BASE_OPTS[@]}" -p "$port" "root@$host" "$remote_shell" <"$script_file" >"$log_file" 2>&1; then
         cat "$log_file"
         return 0
     else
@@ -861,6 +1007,9 @@ wait_for_ssh_ready() {
             sleep 1
         done
     fi
+
+    # Vast：先等 running（映像載入有自己的預算與停滯偵測），起不來回 124 讓呼叫端換一台
+    wait_for_instance_running || return $?
 
     start="$(date +%s)"
     while :; do
@@ -1884,7 +2033,19 @@ load_runpod_api_key() {
     exit 1
 }
 
-load_runpod_api_key
+load_vast_api_key() {
+    if vast_lib_load_api_key; then
+        return 0
+    fi
+    printf '[cloud_asr.sh] ERROR: %s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "missing Vast.ai credential: set VAST_API_KEY or create $(vast_lib_api_key_file_hint)" >&2
+    exit 1
+}
+
+if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+    load_vast_api_key
+else
+    load_runpod_api_key
+fi
 load_ssh_public_key
 
 if [[ -z "$BASENAME" || "$BASENAME" == */* ]]; then
@@ -1892,7 +2053,12 @@ if [[ -z "$BASENAME" || "$BASENAME" == */* ]]; then
 fi
 
 require_cmd curl
-if [[ "$RUNPOD_CLOUD_TYPE" == "COMMUNITY" ]]; then
+if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
+    require_cmd "${VAST_LIB_CLI:-vastai}"
+    # 帳號沒掛 SSH 公鑰的話，開了機器也連不進去，錢照燒。開機前查完，成本是零。
+    vast_lib_cli show ssh-keys | jq -e 'type == "array" and length > 0' >/dev/null 2>&1 \
+        || die "no SSH key on the Vast.ai account; run: vastai create ssh-key \"\$(cat $SSH_PUBLIC_KEY_PATH)\""
+elif [[ "$RUNPOD_CLOUD_TYPE" == "COMMUNITY" ]]; then
     require_cmd runpodctl
 fi
 require_cmd jq
