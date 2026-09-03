@@ -76,7 +76,7 @@ All user-specific paths default to `$HOME` conventions and can be overridden wit
 | `SRT_DATA_DIR` | `$HOME/Documents/For_Claude/scripts/subtitle` | private glossary + media output (kept out of this repo) |
 | `SRT_TERMS` | `$SRT_DATA_DIR/srt_correct/terms_austin_v2.txt` | your terminology file |
 | `SRT_VV_SCRIPT` | `$HOME/dev/vibevoice-poc/vibevoice_asr.py` | the optional VibeVoice ASR script |
-| `SRT_ASR_ENGINE` | `mlx` | ASR backend: `mlx` (local Apple Silicon) or `runpod` (cloud RTX 4090). Also settable per-run with `--engine=`. All four ASR paths support cloud, so **a machine without Apple Silicon can run a full episode**. **Default stays local on purpose** — see "Cloud ASR" below |
+| `SRT_ASR_ENGINE` | `mlx` | ASR backend: `mlx` (local Apple Silicon), `runpod` (cloud RTX 4090) or `vast` (Vast.ai, cheapest verified RTX 5090 offer). Also settable per-run with `--engine=`. All four ASR paths support cloud, so **a machine without Apple Silicon can run a full episode**. **Default stays local on purpose** — see "Cloud ASR" below |
 
 ### Cloud ASR
 
@@ -180,7 +180,7 @@ git clone <repo-url> ~/.claude/skills/srt
 | `SRT_DATA_DIR` | `$HOME/Documents/For_Claude/scripts/subtitle` | 私人術語表 + media 產物（不進此 repo） |
 | `SRT_TERMS` | `$SRT_DATA_DIR/srt_correct/terms_austin_v2.txt` | 你的術語檔 |
 | `SRT_VV_SCRIPT` | `$HOME/dev/vibevoice-poc/vibevoice_asr.py` | 選用的 VibeVoice ASR 腳本 |
-| `SRT_ASR_ENGINE` | `mlx` | ASR 引擎：`mlx`（本地 Apple Silicon）或 `runpod`（雲端 RTX 4090）。也可用 `--engine=` 逐次指定。四條 ASR 路徑都支援雲端，**沒有 Apple Silicon 也能跑完整支**。**預設維持本地是刻意的**——見下方「雲端 ASR」 |
+| `SRT_ASR_ENGINE` | `mlx` | ASR 引擎：`mlx`（本地 Apple Silicon）、`runpod`（雲端 RTX 4090）或 `vast`（Vast.ai，挑最便宜的已驗證 RTX 5090 報價）。也可用 `--engine=` 逐次指定。四條 ASR 路徑都支援雲端，**沒有 Apple Silicon 也能跑完整支**。**預設維持本地是刻意的**——見下方「雲端 ASR」 |
 
 ### 雲端 ASR
 

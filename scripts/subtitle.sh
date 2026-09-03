@@ -108,7 +108,8 @@ strict_srt_count() {
 
 # ---------- 參數解析 ----------
 INPUT_FILE=""
-# ASR 引擎：mlx（預設，本地 Apple Silicon）或 runpod（雲端 RTX 4090）
+# ASR 引擎：mlx（預設，本地 Apple Silicon）、runpod（雲端 RTX 4090）或 vast（Vast.ai 雲端，2026-09-03 起）
+# runpod 與 vast 走同一支 cloud_asr.sh，只差 CLOUD_ASR_PROVIDER；底下用 ASR_ENGINE_IS_CLOUD 判斷。
 # 預設維持 mlx 是刻意的——雲端輸出與本地不等價（跨側差 2.07%，兩邊自噪皆 0），
 # 詳見 company/_shared/collab/20260829-srt-cloud-asr-runpod/FINAL-srt-cloud-asr-plan.md
 ASR_ENGINE="${SRT_ASR_ENGINE:-mlx}"
@@ -133,7 +134,7 @@ for arg in "$@"; do
             MODEL="mlx-community/whisper-large-v3-turbo"
             ;;
         --engine)
-            print_error "--engine 需要用 --engine=<mlx|runpod> 的形式"
+            print_error "--engine 需要用 --engine=<mlx|runpod|vast> 的形式"
             exit 1
             ;;
         --engine=*)
@@ -167,9 +168,11 @@ done
 # 引擎值統一在此驗一次（旗標與環境變數兩條路都要過）。
 # 只在旗標那邊驗會漏掉 SRT_ASR_ENGINE=bogus——那會靜默降級成 mlx，
 # 使用者以為上雲了其實在本地跑。這是「靜默失效」家族。
+ASR_ENGINE_IS_CLOUD=false
 case "${ASR_ENGINE}" in
-    mlx|runpod) ;;
-    *) print_error "未知引擎：${ASR_ENGINE}（可用 mlx 或 runpod；也可用 SRT_ASR_ENGINE 環境變數設定）"; exit 1 ;;
+    mlx) ;;
+    runpod|vast) ASR_ENGINE_IS_CLOUD=true ;;
+    *) print_error "未知引擎：${ASR_ENGINE}（可用 mlx、runpod 或 vast；也可用 SRT_ASR_ENGINE 環境變數設定）"; exit 1 ;;
 esac
 
 if [ -z "$INPUT_FILE" ]; then
@@ -202,8 +205,8 @@ if [ "$ENGINE_EXPLICIT" = false ] && [ "$ASR_ENGINE" = "mlx" ]; then
                 echo "    兩條路，請選一條："
                 echo ""
                 echo "    1. 走雲端（推薦）"
-                echo "       加上 --engine=runpod，或設 SRT_ASR_ENGINE=runpod"
-                echo "       需要 RunPod 帳號與餘額，一支 50 分鐘的影片約 US\$0.05-0.15"
+                echo "       加上 --engine=runpod 或 --engine=vast，或設 SRT_ASR_ENGINE=runpod|vast"
+                echo "       需要 RunPod 或 Vast.ai 帳號與餘額，一支 50 分鐘的影片約 US\$0.05-0.15"
                 echo "       設定方式見 docs/CLOUD-ASR-SETUP.md"
                 echo ""
                 echo "    2. 仍然在本地跑（不建議）"
@@ -214,7 +217,7 @@ if [ "$ENGINE_EXPLICIT" = false ] && [ "$ASR_ENGINE" = "mlx" ]; then
                 ;;
             risky)
                 print_warning "這台機器跑本地語音辨識可能會失敗：${CAP_REASON:-記憶體邊際不足}"
-                echo "    要保險的話改用 --engine=runpod（雲端，一支影片約 US\$0.05-0.15）"
+                echo "    要保險的話改用 --engine=runpod 或 --engine=vast（雲端，一支影片約 US\$0.05-0.15）"
                 echo "    現在照你原本的設定，繼續走本地。"
                 echo ""
                 ;;
@@ -247,10 +250,11 @@ check_dependency ffmpeg
 # 依賴要跟著引擎走。無條件檢查 mlx_whisper 會讓沒有 MLX 的機器
 # 在還沒走到雲端那條路之前就死掉——引擎分流加在執行點，檢查點也必須跟上。
 # （2026-08-30 在 Mini CC / M1 8GB 無 MLX 實測撞到，那時 --engine=runpod 完全跑不起來。）
-if [ "$ASR_ENGINE" = "runpod" ]; then
+if [ "$ASR_ENGINE_IS_CLOUD" = true ]; then
     for dep in curl ssh scp python3; do
         check_dependency "$dep"
     done
+    [ "$ASR_ENGINE" = "vast" ] && check_dependency "${VAST_LIB_CLI:-vastai}"
 else
     check_dependency mlx_whisper
 fi
@@ -327,7 +331,7 @@ fi
 MLX_MARKER="$(mktemp -t mlx_marker.XXXXXX)"
 MLX_STDOUT_LOG="$(mktemp -t mlx_stdout.XXXXXX)"
 set +e
-if [ "$ASR_ENGINE" = "runpod" ]; then
+if [ "$ASR_ENGINE_IS_CLOUD" = true ]; then
     # 雲端分流。cloud_asr.sh 是 drop-in 替代品：同樣的 wav 進去、
     # 同樣的 ${DIR}/${BASENAME}.srt 出來，所以底下的檔名 fallback 與
     # strict 驗證完全不用改。憑證走環境變數 RUNPOD_API_KEY，不落檔。
@@ -342,7 +346,8 @@ if [ "$ASR_ENGINE" = "runpod" ]; then
         print_error "找不到可執行的 cloud_asr.sh：$CLOUD_ASR"
         rm -f "$MLX_MARKER"; exit 1
     fi
-    "$CLOUD_ASR" "$WAV_FILE" "$DIR" "$BASENAME" "$LANGUAGE" "${ENGINE_FLAGS[@]}" 2>&1 | tee "$MLX_STDOUT_LOG"
+    # 平台由引擎名決定；不用 export 是刻意的——只影響這一次呼叫，不外洩到後面的步驟
+    CLOUD_ASR_PROVIDER="$ASR_ENGINE" "$CLOUD_ASR" "$WAV_FILE" "$DIR" "$BASENAME" "$LANGUAGE" "${ENGINE_FLAGS[@]}" 2>&1 | tee "$MLX_STDOUT_LOG"
 else
     mlx_whisper "${MLX_WHISPER_ARGS[@]}" "$WAV_FILE" 2>&1 | tee "$MLX_STDOUT_LOG"
 fi
@@ -379,8 +384,8 @@ if [ "$(strict_srt_count "$MLX_OUTPUT")" -eq 0 ] && [ "$ASR_ENGINE" = "mlx" ]; t
 fi
 
 if [ "$(strict_srt_count "$MLX_OUTPUT")" -eq 0 ]; then
-    if [ "$ASR_ENGINE" = "runpod" ]; then
-        print_error "雲端 ASR 未產生有效 SRT（cloud_asr.sh exit=${mlx_status}）；已保留 log: $MLX_STDOUT_LOG"
+    if [ "$ASR_ENGINE_IS_CLOUD" = true ]; then
+        print_error "雲端 ASR 未產生有效 SRT（${ASR_ENGINE}，cloud_asr.sh exit=${mlx_status}）；已保留 log: $MLX_STDOUT_LOG"
     else
         print_error "Whisper 未產生有效 SRT（mlx exit=${mlx_status}）；已保留 stdout log: $MLX_STDOUT_LOG"
     fi

@@ -187,9 +187,12 @@ def run_asr(wav_path, output_dir, use_breeze=True):
         return None
 
     asr_engine = os.environ.get('SRT_ASR_ENGINE')
+    # runpod 與 vast 都是「每次呼叫開一台機器」的雲端引擎，規則一樣：獨立 call 目錄、失敗即停、逾時先 SIGTERM
+    asr_is_cloud = asr_engine in ('runpod', 'vast')
+    engine_label = {'runpod': 'RunPod', 'vast': 'Vast.ai'}.get(asr_engine or '', asr_engine)
     asr_wav_path = wav_path
     asr_output_dir = output_dir
-    if asr_engine == 'runpod':
+    if asr_is_cloud:
         runs_root = os.path.join(output_dir, '.cloud_asr_runs')
         try:
             os.makedirs(runs_root, exist_ok=True)
@@ -197,11 +200,11 @@ def run_asr(wav_path, output_dir, use_breeze=True):
             asr_wav_path = os.path.join(asr_output_dir, os.path.basename(wav_path))
             shutil.copy2(wav_path, asr_wav_path)
         except OSError as exc:
-            print(f"  ❌ 建立 RunPod call 目錄失敗: {exc}", file=sys.stderr)
+            print(f"  ❌ 建立 {engine_label} call 目錄失敗: {exc}", file=sys.stderr)
             _ASR_HARD_STOP = True
             return None
-        print(f"  ☁️ RunPod call dir: {asr_output_dir}", file=sys.stderr)
-        print(f"  ☁️ RunPod evidence dir: {os.path.join(asr_output_dir, 'env')}", file=sys.stderr)
+        print(f"  ☁️ {engine_label} call dir: {asr_output_dir}", file=sys.stderr)
+        print(f"  ☁️ {engine_label} evidence dir: {os.path.join(asr_output_dir, 'env')}", file=sys.stderr)
 
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     subtitle_sh = os.path.join(script_dir, 'subtitle.sh')
@@ -234,10 +237,10 @@ def run_asr(wav_path, output_dir, use_breeze=True):
             print("  ✅ 它自己收乾淨了", file=sys.stderr)
         except subprocess.TimeoutExpired:
             print("  🔴 60 秒內沒收乾淨，改用 SIGKILL —— "
-                  "雲端機器可能被遺棄，請跑 scripts/runpod_reap.sh 確認", file=sys.stderr)
+                  "雲端機器可能被遺棄，請跑 scripts/runpod_reap.sh 或 scripts/vast_reap.sh 確認", file=sys.stderr)
             proc.kill()
             stdout, stderr = proc.communicate()
-        if asr_engine == 'runpod':
+        if asr_is_cloud:
             print("  🛑 雲端模式：ASR timeout 後停止整支，避免下一個 anomaly 再開機器。",
                   file=sys.stderr)
             _ASR_HARD_STOP = True
@@ -271,7 +274,7 @@ def run_asr(wav_path, output_dir, use_breeze=True):
         # 它會一路開到總量熔斷為止。（2026-08-30 pi 在派工前抓到，沒花到錢。）
         #
         # 本地模式不停：本地失敗不花錢，繼續試下一段是對的。
-        if os.environ.get('SRT_ASR_ENGINE') == 'runpod':
+        if asr_is_cloud:
             print("  🛑 雲端模式：第一次 ASR 失敗即停止整支，避免對下一段再開機器。",
                   file=sys.stderr)
             _ASR_HARD_STOP = True

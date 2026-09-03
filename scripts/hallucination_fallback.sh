@@ -2,7 +2,7 @@
 # ASR 幻覺 fallback：用 Whisper large-v3 重跑 Breeze 無法修復的幻覺段
 # 用法：hallucination_fallback.sh <SRT檔> <影片或音檔> <起始時間> <結束時間> [可選提示詞]
 #
-# ASR 引擎：預設本地 mlx；設 SRT_ASR_ENGINE=runpod 走雲端 RTX 4090。
+# ASR 引擎：預設本地 mlx；設 SRT_ASR_ENGINE=runpod 走雲端 RTX 4090，SRT_ASR_ENGINE=vast 走 Vast.ai。
 #
 # 已知前置證據（2026-08-30 live 實測更新，n=1 clip）：
 # 正常語音段：雲端 Systran/faster-whisper-large-v3 與本地 MLX 帶同一個 prompt，
@@ -25,9 +25,12 @@ HALL_START="$3"
 HALL_END="$4"
 INITIAL_PROMPT="${5:-}"
 ASR_ENGINE="${SRT_ASR_ENGINE:-mlx}"
+ASR_ENGINE_IS_CLOUD=false
 case "${ASR_ENGINE}" in
-  mlx|runpod) ;;
-  *) echo "ERROR: 未知引擎：${ASR_ENGINE}（可用 mlx 或 runpod）" >&2; exit 1 ;;
+  mlx) ;;
+  runpod) ASR_ENGINE_IS_CLOUD=true; ENGINE_LABEL="RunPod" ;;
+  vast)   ASR_ENGINE_IS_CLOUD=true; ENGINE_LABEL="Vast.ai" ;;
+  *) echo "ERROR: 未知引擎：${ASR_ENGINE}（可用 mlx、runpod 或 vast）" >&2; exit 1 ;;
 esac
 
 WORK_DIR="$(dirname "$SRT_FILE")"
@@ -61,13 +64,13 @@ if [ -n "$INITIAL_PROMPT" ]; then
   WHISPER_ARGS+=(--initial-prompt "$INITIAL_PROMPT")
 fi
 
-if [ "${ASR_ENGINE}" = "runpod" ]; then
+if [ "${ASR_ENGINE_IS_CLOUD}" = true ]; then
   CLOUD_RUNS_DIR="${WORK_DIR}/.cloud_asr_runs"
   mkdir -p "$CLOUD_RUNS_DIR"
   CLOUD_RUN_DIR="$(mktemp -d "${CLOUD_RUNS_DIR}/run.XXXXXX")"
   CLOUD_EVIDENCE_DIR="${CLOUD_RUN_DIR}/env"
-  echo "RunPod cloud ASR run dir: ${CLOUD_RUN_DIR}" >&2
-  echo "RunPod evidence dir: ${CLOUD_EVIDENCE_DIR}" >&2
+  echo "${ENGINE_LABEL} cloud ASR run dir: ${CLOUD_RUN_DIR}" >&2
+  echo "${ENGINE_LABEL} evidence dir: ${CLOUD_EVIDENCE_DIR}" >&2
 
   CLOUD_ARGS=(
     "$SCRIPT_DIR/cloud_asr.sh"
@@ -80,7 +83,7 @@ if [ "${ASR_ENGINE}" = "runpod" ]; then
   if [ -n "$INITIAL_PROMPT" ]; then
     CLOUD_ARGS+=(--initial-prompt "$INITIAL_PROMPT")
   fi
-  if ! bash "${CLOUD_ARGS[@]}"; then
+  if ! CLOUD_ASR_PROVIDER="${ASR_ENGINE}" bash "${CLOUD_ARGS[@]}"; then
     rm -f "$FIX_WAV"
     exit 1
   fi
