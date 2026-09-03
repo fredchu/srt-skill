@@ -31,6 +31,11 @@ VAST_LIB_TERMINATE_LAST_ERROR=""
 # 每次 CLI 呼叫的秒數上限。CLI 自己有 --retry，但沒有總逾時；沒這層的話
 # 一次卡住的查詢會讓上層輪詢停擺，機器在那邊繼續計費。
 VAST_LIB_CLI_TIMEOUT="${VAST_LIB_CLI_TIMEOUT:-90}"
+# 主機驅動支援的 CUDA 下限。要跟映像的 CUDA 版本對齊（vastai/pytorch …-cuda-12.9-… 就是 12.9）：
+# 2026-09-03 土耳其 4090（驅動 570、CUDA 12.8）過了 12.8 的篩選，torch 卻報
+# 「Error 804: forward compatibility was attempted on non supported HW」——GeForce 不能向前相容，
+# 驅動比映像舊就是不能用。成功的韓國 5090 是 13.0。
+VAST_LIB_MIN_CUDA="${VAST_LIB_MIN_CUDA:-12.9}"
 
 vast_lib_info() {
     printf '[vast] %s\n' "$*" >&2
@@ -91,6 +96,7 @@ vast_lib_cli() {
 #              Vast 自己的 geolocation 一下標 US 一下標 CN；台灣主機 3 分鐘拉完。
 #              geolocation 靠 IP 反查，擋不住這種「IP 在美國、機器在中國」的主機，
 #              只能用 IP 前綴擋。）
+# CUDA 下限由 VAST_LIB_MIN_CUDA（預設 12.9）決定，換映像時要一起改。
 # 為什麼要 verified + reliability + direct_port_count：
 #   沒 verified 的機器 CUDA 可能不能用；沒直連埠就沒有直連 SSH，整條流程跑不起來
 #   （跟 RunPod 社群雲要 --public-ip 是同一件事）。
@@ -99,7 +105,7 @@ vast_lib_pick_offers() {
     local gpu_q query geo_q offers
     gpu_q="${gpu// /_}"
     geo_q="$(printf '%s' "$geo_exclude" | tr ',' '\n' | sed '/^$/d' | sed 's/^/"/; s/$/"/' | paste -sd, -)"
-    query="gpu_name=${gpu_q} num_gpus=1 rentable=true verified=true reliability>=0.98 cuda_vers>=12.8 disk_space>=${disk_gb} direct_port_count>=1 inet_up>=100 inet_down>=100 dph_total<=${max_dph}"
+    query="gpu_name=${gpu_q} num_gpus=1 rentable=true verified=true reliability>=0.98 cuda_vers>=${VAST_LIB_MIN_CUDA} disk_space>=${disk_gb} direct_port_count>=1 inet_up>=100 inet_down>=100 dph_total<=${max_dph}"
     [[ -n "$geo_q" ]] && query="$query geolocation notin [${geo_q}]"
     [[ -n "$extra" ]] && query="$query $extra"
     offers="$(vast_lib_cli search offers "$query" --order dph_total --limit 20)" || return 1
