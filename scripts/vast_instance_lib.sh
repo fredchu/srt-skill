@@ -85,7 +85,14 @@ vast_lib_cli() {
     if [[ -n "${VAST_API_KEY:-}" ]]; then
         cmd+=(--api-key "$VAST_API_KEY")
     fi
-    "${cmd[@]}" "$@" --raw 2>/dev/null
+    # --raw 一律放在 --args 前面：--args 會把後面所有東西吃進容器參數，放最後就變成 vLLM 的 --raw
+    # （2026-09-04 book-translator 首跑：vllm: error: unrecognized arguments: --raw，容器反覆重啟）。
+    local -a pre=() post=() a; local seen_args=0
+    for a in "$@"; do
+        if [[ $seen_args -eq 0 && "$a" == "--args" ]]; then seen_args=1; fi
+        if [[ $seen_args -eq 0 ]]; then pre+=("$a"); else post+=("$a"); fi
+    done
+    "${cmd[@]}" "${pre[@]}" --raw ${post[@]+"${post[@]}"} 2>/dev/null
 }
 
 # 依規格挑報價。stdout＝一行一張，格式 "報價id<TAB>一行摘要"，時價由低到高；
@@ -127,6 +134,19 @@ vast_lib_pick_offers() {
     ' <<<"$offers" 2>/dev/null | grep -v '^$' || return 1
 }
 
+# 從 create 的回應撈 new_contract。--ssh 模式回 JSON；args 模式（2026-09-04 實測）回
+# 「Started. {'success': True, 'new_contract': 49767561, ...}」——Python 字典的字串，不是 JSON。
+# 兩種都吃。呼叫端拿不到 id 時**還是要依 label 回查**：解析失敗不等於沒開機（那天連漏三台）。
+vast_lib_parse_new_contract() {
+    local resp="$1" id
+    id="$(jq -r 'select(type == "object") | select(.success == true) | .new_contract // empty' <<<"$resp" 2>/dev/null || true)"
+    if [[ -z "$id" ]]; then
+        id="$(sed -n "s/.*'new_contract': *\([0-9][0-9]*\).*/\1/p" <<<"$resp" | head -n 1)"
+        [[ -n "$id" ]] && ! grep -q "'success': *True" <<<"$resp" && id=""
+    fi
+    printf '%s' "$id"
+}
+
 # 開機。rc 0：stdout＝新機器 id。rc 1（報價被搶、餘額不足、參數錯）：stdout＝錯誤原文。
 # 錯誤走 stdout 而不是全域變數，因為呼叫端幾乎都在 $(…) 裡呼叫，子殼裡設的變數傳不回去。
 #   OFFER_ID  報價 id
@@ -143,12 +163,45 @@ vast_lib_create_instance() {
                    --label "$label" --ssh --direct --cancel-unavail)
     [[ -n "$onstart" ]] && args+=(--onstart-cmd "$onstart")
     resp="$(vast_lib_cli "${args[@]}")" || rc=$?
-    id="$(jq -r 'select(type == "object") | select(.success == true) | .new_contract // empty' <<<"$resp" 2>/dev/null || true)"
+    id="$(vast_lib_parse_new_contract "$resp")"
     if [[ -n "$id" ]]; then
         printf '%s\n' "$id"
         return 0
     fi
     printf 'rc=%s resp=%s\n' "$rc" "$(tr -d '\r\n' <<<"${resp:-<empty>}")"
+    return 1
+}
+
+# 開機（args 模式，不注入 SSH）：容器直接跑映像的 ENTRYPOINT，參數由 ARGS 給，服務埠用 ENV 的
+# "-p 8000:8000" 對外開。給「開一個 HTTP 伺服器讓本機打」的用法（book-translator 的 vLLM，2026-09-04）。
+# rc 0：stdout＝新機器 id；rc 1：stdout＝錯誤原文（理由同上面那個函式）。
+#   OFFER_ID IMAGE DISK_GB LABEL ENV_STR  然後 ARGS...（原樣接在 --args 後面）
+# ENV_STR 是 vastai 的 --env 字串，例如 '-p 8000:8000 -e HF_TOKEN=xxx'。
+vast_lib_create_instance_args() {
+    local offer_id="$1" image="$2" disk_gb="$3" label="$4" env_str="$5"; shift 5
+    local resp id rc=0
+    local -a args=(create instance "$offer_id" --image "$image" --disk "$disk_gb"
+                   --label "$label" --cancel-unavail --env "$env_str" --args "$@")
+    resp="$(vast_lib_cli "${args[@]}")" || rc=$?
+    id="$(vast_lib_parse_new_contract "$resp")"
+    if [[ -n "$id" ]]; then
+        printf '%s\n' "$id"
+        return 0
+    fi
+    printf 'rc=%s resp=%s\n' "$rc" "$(tr -d '\r\n' <<<"${resp:-<empty>}")"
+    return 1
+}
+
+# stdout＝"host<TAB>port"：某個容器埠（例如 8000）對外的公網位址。ports 在容器起來前是 null，rc 1。
+vast_lib_port_endpoint_from_record() {
+    local record="$1" port="$2"
+    local host hostport
+    host="$(jq -r '.public_ipaddr // empty' <<<"$record" 2>/dev/null)"
+    hostport="$(jq -r --arg p "${port}/tcp" '((.ports // {})[$p] // [] | .[0].HostPort // empty) | tostring' <<<"$record" 2>/dev/null)"
+    if [[ -n "$host" && -n "$hostport" && "$host" != "null" && "$hostport" != "null" ]]; then
+        printf '%s\t%s\n' "$host" "$hostport"
+        return 0
+    fi
     return 1
 }
 

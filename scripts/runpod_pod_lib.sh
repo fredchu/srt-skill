@@ -232,6 +232,20 @@ runpod_lib_ssh_endpoint() {
     runpod_lib_ssh_endpoint_from_record "$record"
 }
 
+# stdout＝"host<TAB>port"：某個容器埠（例如 8000）對外的公網位址，讀 runtime.ports 裡 private==PORT 的那筆。
+# 給不走 SSH、直接開 HTTP 服務的 pod（book-translator 的 vLLM，2026-09-04）。rc 1＝還沒生成。
+runpod_lib_port_endpoint_from_record() {
+    local record="$1" port="$2"
+    local host public
+    host="$(jq -r --arg p "$port" '(.runtime.ports // [])[]? | select((.type // "") == "tcp" and ((.private // .privatePort // empty | tostring) == $p)) | (.ip // empty)' <<<"$record" 2>/dev/null | head -n 1)"
+    public="$(jq -r --arg p "$port" '(.runtime.ports // [])[]? | select((.type // "") == "tcp" and ((.private // .privatePort // empty | tostring) == $p)) | (.public // .publicPort // empty | tostring)' <<<"$record" 2>/dev/null | grep -v '^$' | head -n 1)"
+    if [[ -n "$host" && -n "$public" && "$host" != "null" && "$public" != "null" ]]; then
+        printf '%s\t%s\n' "$host" "$public"
+        return 0
+    fi
+    return 1
+}
+
 # 停機 / 啟動。v2 把 stop/start 併成 POST /pods/<id>/action 帶 JSON body；
 # v1 的 /pods/<id>/stop 路徑已經不存在。rc 非 0＝請求失敗（quiet，不印）。
 runpod_lib_pod_action() {

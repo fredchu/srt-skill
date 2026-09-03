@@ -31,8 +31,8 @@ done
 case "${sub[0]} ${sub[1]}" in
     "show ssh-keys")    printf '%s\n' "$FAKE_SSH_KEYS_JSON" ;;
     "search offers")    printf '%s\n' "${FAKE_OFFERS_JSON:-[]}" ;;
-    "create instance")  n=$(grep -c "create instance" "$FAKE_CALLS"); printf '{"success":true,"new_contract":%s}\n' "$((9000 + n))" ;;
-    "show instances")   printf '%s\n' "${FAKE_INSTANCES_JSON:-[]}" ;;
+    "create instance")  n=$(grep -c "create instance" "$FAKE_CALLS"); [[ -n "${FAKE_CREATE_GARBAGE:-}" ]] && { echo garbage; exit 0; }; printf '{"success":true,"new_contract":%s}\n' "$((9000 + n))" ;;
+    "show instances")   if [[ -n "${FAKE_CREATE_GARBAGE:-}" ]] && ! grep -q "destroy instance" "$FAKE_CALLS"; then lbl=$(grep -o -- "--label [^ ]*" "$FAKE_CALLS" | head -1 | cut -d" " -f2); printf '[{"id":9001,"label":"%s","actual_status":"running"}]\n' "$lbl"; exit 0; fi; printf '%s\n' "${FAKE_INSTANCES_JSON:-[]}" ;;
     "show instance")    printf '%s\n' "$FAKE_INSTANCE_JSON" ;;
     "destroy instance") exit 0 ;;
     *) exit 1 ;;
@@ -126,3 +126,10 @@ def test_default_provider_never_touches_vastai(tmp_path: Path) -> None:
     log, calls, rc = _run(tmp_path, {"FAKE_OFFERS_JSON": json.dumps(OFFERS)}, provider=None)
     assert calls == [], calls
     assert "creating RunPod pod" in log
+
+
+def test_unparseable_create_adopts_by_label_instead_of_retrying(tmp_path: Path) -> None:
+    log, calls, rc = _run(tmp_path, {"FAKE_OFFERS_JSON": json.dumps(OFFERS), "FAKE_INSTANCE_JSON": json.dumps(RUNNING),
+                                     "FAKE_CREATE_GARBAGE": "1", "MAX_POD_ATTEMPTS": "1"})
+    assert sum(1 for c in calls if "create instance" in c) == 1, calls
+    assert "adopting it" in log and "action=terminate result=success" in log

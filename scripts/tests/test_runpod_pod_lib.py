@@ -210,3 +210,14 @@ def test_caller_can_override_log_functions(tmp_path: Path) -> None:
     assert "rc=0" in r.stdout
     assert "MINE: pod already absent" in r.stderr
     assert "[runpod]" not in r.stderr
+
+
+def test_port_endpoint_from_record_reads_runtime_ports_by_private_port(tmp_path: Path) -> None:
+    rec = {"id": "p1", "runtime": {"ports": [
+        {"private": 22, "public": 34446, "type": "tcp", "ip": "195.26.233.3"},
+        {"private": 8000, "public": 30181, "type": "tcp", "ip": "195.26.233.3"},
+    ]}}
+    r = run_lib(f"runpod_lib_port_endpoint_from_record '{json.dumps(rec)}' 8000", tmp_path)
+    assert r.stdout == "195.26.233.3\t30181\n"
+    r = run_lib(f"runpod_lib_port_endpoint_from_record '{json.dumps({'id': 'p1', 'runtime': {'ports': []}})}' 8000; echo rc=$?", tmp_path)
+    assert r.stdout.strip() == "rc=1"

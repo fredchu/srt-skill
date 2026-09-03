@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.12.3 - 2026-09-04
+
+### 修正
+
+- **開機回應解析失敗不等於沒開機——依 label 回查認領，不再直接換下一張。** book-translator 的 `cloud_llm.sh`
+  首跑用 args 模式（不注入 SSH）開機，`vastai create instance` 回的是「`Started. {'success': True,
+  'new_contract': 49767561, ...}`」——Python 字典字串加前綴，不是 JSON；jq 解不出 id 就被當「開不起來」，
+  三張報價連開三台全部漏掉（手動砍，各在 loading 一兩分鐘，幾分錢）。兩處修法：
+  `vast_lib_parse_new_contract` 同時吃 JSON 與這種字串（`vast_lib_create_instance` 與新的
+  `vast_lib_create_instance_args` 共用）；`cloud_asr.sh` 換下一張報價前先
+  `vast_lib_find_live_instance_by_label`，有就認領。bookcast 0.3.8 之後與 book-translator 同步補了同一道回查。
+- **`vast_lib_cli` 把 `--raw` 放在 `--args` 前面。** 原本一律加在整條指令最後，而 `--args` 會把後面所有東西吃進容器
+  參數，`--raw` 就變成 vLLM 的參數（`vllm: error: unrecognized arguments: --raw`），容器反覆重啟、狀態卻一直是
+  running——外面只看到「還在載入模型」。book-translator 的 `cloud_llm.sh` 因此改成等待期間每五輪印一次
+  `vastai logs` 尾巴，這種錯下次一眼就看到。
+- 新增 `vast_lib_create_instance_args`（args 模式：`--env '-p 8000:8000'`＋`--args …`，給直接開 HTTP 服務的映像）、
+  `vast_lib_port_endpoint_from_record`／`runpod_lib_port_endpoint_from_record`（讀某個容器埠的公網對應）。
+
 ## 1.12.2 - 2026-09-03
 
 ### 修正

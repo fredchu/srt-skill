@@ -618,6 +618,12 @@ create_instance_vast() {
             POD_ID="$out"
             return 0
         fi
+        # 解析失敗≠沒開機（09-04 args 模式回 Python 字典字串，連漏三台）。換下一張前先依 label 回查，有就認領。
+        if adopted="$(vast_lib_find_live_instance_by_label "$label")" && [[ -n "$adopted" ]]; then
+            info "offer $offer_id: create response unparsed but instance $adopted exists with our label; adopting it"
+            POD_ID="$adopted"
+            return 0
+        fi
         info "offer $offer_id could not be rented (${out:-<empty>}); trying next"
         append_pod_attempt_log "attempt=${ATTEMPT} offer=${offer_id} action=create result=offer_failed error=$(tr -d '\n' <<<"${out:-<empty>}")"
     done <<<"$rows"

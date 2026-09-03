@@ -264,4 +264,37 @@ def test_load_api_key_env_then_file(tmp_path: Path) -> None:
 
 def test_api_key_is_passed_explicitly_to_cli(tmp_path: Path) -> None:
     run_lib('vast_lib_instances_live_json >/dev/null', tmp_path, {"FAKE_INSTANCES_JSON": "[]", "VAST_API_KEY": "sekret"})
-    assert calls(tmp_path)[0].startswith("--api-key sekret show instances")
+    assert calls(tmp_path)[0] == "--api-key sekret show instances --raw"
+
+
+# ---------- args 模式開機與服務埠（book-translator 的 vLLM） ----------
+
+def test_create_instance_args_mode_passes_env_and_args_without_ssh(tmp_path: Path) -> None:
+    r = run_lib('vast_lib_create_instance_args 55 vllm/vllm-openai:v0.28.0 80 bt-x "-p 8000:8000 -e HF_TOKEN=t" --model m --port 8000 --api-key k',
+                tmp_path, {"FAKE_CREATE_JSON": json.dumps({"success": True, "new_contract": 8801})})
+    assert r.stdout.strip() == "8801", r.stderr
+    c = calls(tmp_path)[0]
+    # --raw 必須在 --args 前面，否則會被吃進容器參數
+    assert "create instance 55 --image vllm/vllm-openai:v0.28.0 --disk 80 --label bt-x --cancel-unavail --env -p 8000:8000 -e HF_TOKEN=t --raw --args --model m --port 8000 --api-key k" in c
+    assert not c.endswith("--raw")
+    assert "--ssh" not in c and "--direct" not in c
+
+
+def test_port_endpoint_from_record_reads_mapped_port_or_rc1(tmp_path: Path) -> None:
+    rec = {"id": 1, "public_ipaddr": "9.9.9.9", "ports": {"22/tcp": [{"HostPort": "41889"}], "8000/tcp": [{"HostPort": "40123"}]}}
+    r = run_lib(f"vast_lib_port_endpoint_from_record '{json.dumps(rec)}' 8000", tmp_path)
+    assert r.stdout == "9.9.9.9\t40123\n"
+    r = run_lib(f"vast_lib_port_endpoint_from_record '{json.dumps({'id': 1, 'public_ipaddr': '9.9.9.9', 'ports': None})}' 8000; echo rc=$?", tmp_path)
+    assert r.stdout.strip() == "rc=1"
+
+
+def test_create_parses_python_dict_style_response_from_args_mode(tmp_path: Path) -> None:
+    # 2026-09-04 實測：args 模式 vastai 印 "Started. {'success': True, 'new_contract': 49767561, ...}"
+    # 不是 JSON；解析失敗會被當「開不起來」而換下一張，一口氣漏了三台。
+    resp = "Started. {'success': True, 'new_contract': 49767561, 'instance_api_key': 'abc'}"
+    r = run_lib(f"vast_lib_parse_new_contract {json.dumps(resp)}; echo", tmp_path)
+    assert r.stdout.strip() == "49767561"
+    r = run_lib("vast_lib_parse_new_contract \"{'success': False, 'new_contract': 5}\"; echo", tmp_path)
+    assert r.stdout.strip() == ""
+    r = run_lib("vast_lib_parse_new_contract '{\"success\": true, \"new_contract\": 7}'; echo", tmp_path)
+    assert r.stdout.strip() == "7"
