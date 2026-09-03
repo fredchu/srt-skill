@@ -36,6 +36,11 @@ VAST_LIB_CLI_TIMEOUT="${VAST_LIB_CLI_TIMEOUT:-90}"
 # 「Error 804: forward compatibility was attempted on non supported HW」——GeForce 不能向前相容，
 # 驅動比映像舊就是不能用。成功的韓國 5090 是 13.0。
 VAST_LIB_MIN_CUDA="${VAST_LIB_MIN_CUDA:-12.9}"
+# 只挑固定 IP 的主機。2026-09-03 四台 4090 四敗（loading 零訊息／拉一半卡住／SSH 不通）都是
+# static_ip=false、hosting_type=0 的家用線路；五次五過的韓國 5090 是 static_ip=true、hosting_type=1。
+# 官方文件也建議有穩定連線需求就過濾 static_ip=true（家用路由器的埠轉發壞掉＝直連永遠不通）。
+# 代價：當下 4090 16 台剩 6 台、5090 35 台剩 17 台，最便宜價差不到 0.03 美元。設 0 關掉。
+VAST_LIB_REQUIRE_STATIC_IP="${VAST_LIB_REQUIRE_STATIC_IP:-1}"
 
 vast_lib_info() {
     printf '[vast] %s\n' "$*" >&2
@@ -106,6 +111,7 @@ vast_lib_pick_offers() {
     gpu_q="${gpu// /_}"
     geo_q="$(printf '%s' "$geo_exclude" | tr ',' '\n' | sed '/^$/d' | sed 's/^/"/; s/$/"/' | paste -sd, -)"
     query="gpu_name=${gpu_q} num_gpus=1 rentable=true verified=true reliability>=0.98 cuda_vers>=${VAST_LIB_MIN_CUDA} disk_space>=${disk_gb} direct_port_count>=1 inet_up>=100 inet_down>=100 dph_total<=${max_dph}"
+    [[ "$VAST_LIB_REQUIRE_STATIC_IP" == "1" ]] && query="$query static_ip=true"
     [[ -n "$geo_q" ]] && query="$query geolocation notin [${geo_q}]"
     [[ -n "$extra" ]] && query="$query $extra"
     offers="$(vast_lib_cli search offers "$query" --order dph_total --limit 20)" || return 1

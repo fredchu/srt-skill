@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.12.1
+version: 1.12.2
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -112,7 +112,7 @@ ${SUBTITLE_DIR}/
   差異是穩定的實質差異不是雜訊，且**不知道哪邊比較對**。要用雲端請先確認用戶知道這件事。
   一支 50 分鐘的影片約 US$0.05-0.15。設定見 `docs/CLOUD-ASR-SETUP.md`。
   **Vast.ai**（2026-09-03 起）：用戶說「用 vast」「上 vast.ai」→ 加 `CLOUD_ASR_PROVIDER=vast`。先搜報價再開
-  （預設 RTX 5090、每小時上限 0.6 美元、排除 CN/VN 與 137.175./207.246.98./144.202.115. 這些「IP 在美國、
+  （預設 RTX 5090、每小時上限 0.6 美元、只挑固定 IP 主機 `static_ip=true`、排除 CN/VN 與 137.175./207.246.98./144.202.115. 這些「IP 在美國、
   機器在中國、拉不到 Docker Hub」的網段），映像用 Vast 自家 py312 版。起不來（死狀態、拉映像 5 分鐘沒進度）
   就當直連沒生成換下一台，受 `MAX_POD_ATTEMPTS` 限制。憑證 `VAST_API_KEY` 或 `~/.config/vastai/vast_api_key`，
   需要 `vastai` CLI 且帳號已掛 SSH 公鑰。收屍：`bash scripts/vast_reap.sh`（只列出）／`--kill-older-than 30`／`--kill-all`。

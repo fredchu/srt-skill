@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.12.2 - 2026-09-03
+
+### 修正
+
+- **`vast_instance_lib.sh` 挑報價預設加 `static_ip=true`（`VAST_LIB_REQUIRE_STATIC_IP=0` 關掉）。**
+  4090 四台四敗的主機全是 `static_ip=false`、`hosting_type=0` 的家用線路，五次五過的韓國 5090 是固定 IP、
+  `hosting_type=1`；NotebookLM 三輪研究：官方建議有穩定連線需求就過濾 `static_ip=true`，家用路由器埠轉發壞掉
+  就是「直連永遠連不上」的主因，卡 loading 超過 10–15 分鐘就該砍。代價是當下 4090 16→6 台、5090 35→17 台，
+  最便宜價差不到 0.03 美元。`datacenter` 欄位在報價裡全是 null，不能用。
+
 ## 1.12.1 - 2026-09-03
 
 ### 修正

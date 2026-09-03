@@ -109,6 +109,15 @@ def test_status_msg_accessor(tmp_path: Path) -> None:
     assert r.stdout == "x: Pulling fs layer\n\n"
 
 
+def test_pick_offers_requires_static_ip_by_default_and_can_be_disabled(tmp_path: Path) -> None:
+    run_lib('vast_lib_pick_offers "RTX 5090" 40 0.6', tmp_path, {"FAKE_OFFERS_JSON": "[]"})
+    q = calls(tmp_path)[0]
+    assert " static_ip=true" in q and "cuda_vers>=12.9" in q
+    run_lib('vast_lib_pick_offers "RTX 5090" 40 0.6', tmp_path, {"FAKE_OFFERS_JSON": "[]", "VAST_LIB_REQUIRE_STATIC_IP": "0", "VAST_LIB_MIN_CUDA": "12.8"})
+    q = calls(tmp_path)[0]
+    assert "static_ip=true" not in q and "cuda_vers>=12.8" in q
+
+
 def test_pick_offers_returns_1_when_nothing_under_cap(tmp_path: Path) -> None:
     r = run_lib('vast_lib_pick_offers "RTX 5090" 40 0.30; echo "rc=$?"', tmp_path, {"FAKE_OFFERS_JSON": json.dumps(OFFERS)})
     assert r.stdout.strip() == "rc=1"
