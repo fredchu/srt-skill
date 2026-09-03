@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.11.0
+version: 1.12.0
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -102,7 +102,7 @@ ${SUBTITLE_DIR}/
 
 其他參數：
 - **ASR 模式**：預設 Breeze（`--breeze`）。用戶提到 whisper / 英文內容 / 非中文 → 用 Whisper（不加 `--breeze`）
-- **ASR 引擎**：**預設 `mlx`（本地 Apple Silicon）**。用戶提到「用 runpod」「跑雲端」「M1 Max 不在」→ `--engine=runpod`
+- **ASR 引擎**：**預設 `mlx`（本地 Apple Silicon）**。用戶提到「用 runpod」「跑雲端」「M1 Max 不在」→ `--engine=runpod`；「用 vast」「上 vast.ai」→ `--engine=vast`（Vast.ai 段見下）
   （也可用 `SRT_ASR_ENGINE` 環境變數）。
   雲端接 `--breeze` 與不帶旗標的 large-v3（1.10.1 起 subtitle.sh 會送 `--largev3`；
   之前沒送旗標才被拒，不是雲端不支援）；`--turbo` 雲端仍直接報錯。
@@ -111,6 +111,12 @@ ${SUBTITLE_DIR}/
   VibeVoice 跨側 **10.6%**、雲端自噪 1.8%（皆為兩側都 `s2twp` 後的口徑）。
   差異是穩定的實質差異不是雜訊，且**不知道哪邊比較對**。要用雲端請先確認用戶知道這件事。
   一支 50 分鐘的影片約 US$0.05-0.15。設定見 `docs/CLOUD-ASR-SETUP.md`。
+  **Vast.ai**（2026-09-03 起）：用戶說「用 vast」「上 vast.ai」→ 加 `CLOUD_ASR_PROVIDER=vast`。先搜報價再開
+  （預設 RTX 5090、每小時上限 0.6 美元、排除 CN/VN 與 137.175./207.246.98./144.202.115. 這些「IP 在美國、
+  機器在中國、拉不到 Docker Hub」的網段），映像用 Vast 自家 py312 版。起不來（死狀態、拉映像 5 分鐘沒進度）
+  就當直連沒生成換下一台，受 `MAX_POD_ATTEMPTS` 限制。憑證 `VAST_API_KEY` 或 `~/.config/vastai/vast_api_key`，
+  需要 `vastai` CLI 且帳號已掛 SSH 公鑰。收屍：`bash scripts/vast_reap.sh`（只列出）／`--kill-older-than 30`／`--kill-all`。
+  `hallucination_fallback.sh` 與 `srt_hallucination_fix.py` 同樣認 `SRT_ASR_ENGINE=vast`。
   **社群雲**：用戶說「use community runpod」「用社群雲」→ 加 `RUNPOD_CLOUD_TYPE=COMMUNITY`（4090 0.34 美元／小時，
   安全雲 0.74）。開機走 `runpodctl --public-ip`（需本機裝 runpodctl）。回 `graphql error: no longer any instances`
   就加 `RUNPOD_GPU_TYPE_ID="NVIDIA GeForce RTX 5090"` 重試一次，再沒有就退回安全雲。
@@ -244,6 +250,7 @@ bash "${SUBTITLE_DIR}/cloud_asr.sh" "<影片或音檔>" "${VIDEO_DIR}" "<basenam
 - 輸出**無條件轉繁體**（`s2twp`）。VV 的字形不穩定，帶不帶 prompt 都可能出簡體
 - 109 分鐘實測：1 台機器、443 段、1035 秒、**US$0.21**、RTF 0.122
 - 預算緊時用 `MAX_POD_ATTEMPTS=1`（壞機器就停，不換）
+- 便宜路線：`CLOUD_ASR_PROVIDER=vast`（5090 約 0.35–0.45 美元／小時；Vast 上一台起不來會自動換，同樣吃 `MAX_POD_ATTEMPTS`）
 
 **短音檔（≤ 55 分鐘）— 直接跑：**
 

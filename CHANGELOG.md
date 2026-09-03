@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.12.0 - 2026-09-03
+
+### 新增
+
+- **`scripts/vast_instance_lib.sh`：Vast.ai 機器生命週期共用檔**，與 `runpod_pod_lib.sh` 同位置同分工，
+  先給 bookcast 0.3.8 用（`BOOKCAST_CLOUD_PROVIDER=vast`），字幕的 `cloud_asr.sh` 尚未接。走官方
+  `vastai` CLI（1.6.0）的 `--raw` 輸出，不自己打 REST。提供：挑報價（`vast_lib_pick_offers`，每行
+  「報價 id<TAB>摘要」、便宜在前、價格上限本機再濾）、開機（`--ssh --direct --cancel-unavail`，失敗原因
+  走 stdout 帶回——呼叫端在 `$(…)` 裡，全域變數帶不出子殼）、存活清單、依 label 找、單台紀錄、狀態、
+  死狀態判定（`exited`／`unknown`／`offline`）、SSH 位置（優先直連 `public_ipaddr`+`ports["22/tcp"]`，
+  `ports` 還是 null 時退回跳板 `ssh_host`）、stop/start、砍機並回查清單（destroy 回非 0 但清單已不在算成功）。
+  挑報價另有第 6 參數 IP 前綴排除（預設 `137.175.`：09-03 實測該美國註冊網段三台主機拉映像 20 分鐘零進度，
+  Vast 的 geolocation 對同一台一下標 US 一下標 CN，只能用 IP 擋；傳空字串＝不排除），以及
+  `vast_lib_instance_status_msg`（docker pull 最後幾行，給呼叫端偵測停滯）。
+  `VAST_LIB_CLI` 可指到假指令當測試替身；每次呼叫套 `timeout`（`VAST_LIB_CLI_TIMEOUT`，90 秒）。
+  金鑰讀 `VAST_API_KEY` 或 `~/.config/vastai/vast_api_key`，有環境變數時明確帶 `--api-key`。
+  行為測試 `scripts/tests/test_vast_instance_lib.py`（29 條）。**刻意不做**：不擁有 id、不設 trap、
+  不管費用紀錄、沒有 Vast 版 reap 腳本（收屍用 `vastai show instances` ＋ `destroy instance <id> -y`）。
+- **上游全部接上 vast 引擎**：`subtitle.sh --engine=vast`（或 `SRT_ASR_ENGINE=vast`）、`hallucination_fallback.sh`、
+  `srt_correct/srt_hallucination_fix.py` 都把 `vast` 當雲端引擎（跟 runpod 同一套規則：獨立 call 目錄、失敗即停、
+  逾時先 SIGTERM），呼叫 `cloud_asr.sh` 時帶 `CLOUD_ASR_PROVIDER=<引擎名>`；speech-to-prose 走同一支，
+  SKILL.md 補說明。新增 `scripts/vast_reap.sh`（列出／砍掉 Vast.ai 機器，`--kill-older-than N`／`--kill-all`，
+  查不到清單算紅燈），同樣刻意不排程。
+- **`cloud_asr.sh` 支援 `CLOUD_ASR_PROVIDER=vast`**（預設仍 runpod）。平台專屬的只有開機、查紀錄、SSH 位置、
+  存活清單、砍機，其餘（換機重試、費用上限、trap、證據檔、兩種 ASR 模式）共用。Vast 這邊：先搜報價逐張開
+  （`VAST_GPU`＝RTX 5090、`VAST_MAX_DPH`＝0.6、`VAST_GEO_EXCLUDE`、`VAST_IP_EXCLUDE`、`VAST_EXTRA_QUERY`、
+  `VAST_MAX_OFFER_TRIES`＝3）；映像 `VAST_IMAGE`＝Vast 自家 py312/torch 2.8/cu128 mini；磁碟 `VAST_DISK_GB`＝60；
+  遠端指令先 `. /venv/main/bin/activate >/dev/null 2>&1`（`VAST_VENV`）。**起不來就換一台**：先等 `running`
+  （`VAST_BOOT_WAIT_MIN`＝20），死狀態或拉映像訊息 `VAST_BOOT_STALL_MIN`（5）分鐘沒變都回 124，
+  走原本「直連沒生成」的換機迴圈，受 `MAX_POD_ATTEMPTS` 限制——比 bookcast 直接 die 好。
+  預估費率 `RUNPOD_ESTIMATED_RATE_PER_HR` 在 vast 時預設 0.45。開機前查帳號有沒有 SSH 公鑰。
+  測試 `scripts/tests/test_cloud_asr_vast.py`（6 條：沒公鑰不搜報價、超價不開機、停滯／死狀態換機到上限、
+  正常路徑用直連位置並砍機確認、預設 runpod 路徑碰不到 vastai）。09-03 真機試跑一次過：韓國主機 5090
+  （0.402 美元／小時），開機到 running 157 秒、Breeze 跑 2 分鐘音檔出 37 段、計費 237 秒、砍機確認，
+  從啟動到結束 4 分 6 秒，約 0.03 美元。VV 模式同日也真機一次過：同款主機，開機到 running 157 秒、
+  VibeVoice 2 分鐘音檔出 10 段、計費 399 秒、砍機確認，啟動到結束 6 分 45 秒，約 0.05 美元。
+
 ## 1.11.0 - 2026-09-02
 
 ### 新增
