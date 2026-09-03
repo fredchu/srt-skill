@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.12.4 - 2026-09-04
+
+### 變更
+
+- **`vast_lib_pick_offers` 改依「這次跑的預估總費用」排序，不再只看每小時單價；流量單價有上限。** Vast 的流量要錢：
+  09-03 一集 bookcast 實帳 GPU 0.04 美元、下載 5.21 GB 又 0.03 美元；各主機單價從 0 到 0.039 美元／GB（韓國 0.0052、
+  台灣 0.026、德州 0）。排序鍵＝`dph_total × VAST_LIB_EST_HOURS ＋ inet_down_cost × VAST_LIB_EST_DOWN_GB ＋
+  inet_up_cost × VAST_LIB_EST_UP_GB`，摘要列印流量單價與預估值；`VAST_LIB_MAX_INET_COST`（0.03）以上的報價不列。
+  呼叫端各自設預估：cloud_asr Breeze 6 GB／VV 10 GB、0.3 小時；bookcast 5 GB、時數與上傳量依字數算；
+  book-translator int4 29 GB／fp8 41 GB、1.5 小時（映像 10 GB＋模型，流量費常高過 GPU 費）。
+  真報價驗證：三種預估下流量免費的德州 5090 都排第一，book-translator 那組差距最大。
+
 ## 1.12.3 - 2026-09-04
 
 ### 修正

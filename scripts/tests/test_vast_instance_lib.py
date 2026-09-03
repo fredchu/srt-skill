@@ -78,6 +78,8 @@ def test_lib_has_valid_bash_syntax() -> None:
 
 OFFERS = [
     {"id": 3, "gpu_name": "RTX 5090", "dph_total": 0.55, "geolocation": "US", "reliability2": 0.99, "inet_down": 500},
+    # 流量單價 0.05 超過預設上限 0.03，不能出現
+    {"id": 8, "gpu_name": "RTX 5090", "dph_total": 0.30, "geolocation": "US", "inet_down_cost": 0.05, "inet_up_cost": 0.05},
     {"id": 7, "gpu_name": "RTX 5090", "dph_total": 0.20, "geolocation": "US", "public_ipaddr": "137.175.76.24"},
     {"id": 1, "gpu_name": "RTX 5090", "dph_total": 0.35, "geolocation": "US", "reliability2": 0.98, "inet_down": 300},
     {"id": 9, "gpu_name": "RTX 5090", "dph_total": 0.95, "geolocation": "KR", "reliability2": 0.99, "inet_down": 900},
@@ -298,3 +300,29 @@ def test_create_parses_python_dict_style_response_from_args_mode(tmp_path: Path)
     assert r.stdout.strip() == ""
     r = run_lib("vast_lib_parse_new_contract '{\"success\": true, \"new_contract\": 7}'; echo", tmp_path)
     assert r.stdout.strip() == "7"
+
+
+def test_pick_offers_ranks_by_estimated_run_cost_not_hourly_price(tmp_path: Path) -> None:
+    # A 每小時便宜但流量貴；B 每小時貴但流量免費。跑 2 小時＋下載 30 GB 時 B 該排前面。
+    offers = [
+        {"id": 1, "gpu_name": "RTX 5090", "dph_total": 0.40, "inet_down_cost": 0.026, "inet_up_cost": 0.026},
+        {"id": 2, "gpu_name": "RTX 5090", "dph_total": 0.48, "inet_down_cost": 0.0, "inet_up_cost": 0.0},
+    ]
+    r = run_lib('vast_lib_pick_offers "RTX 5090" 40 0.6', tmp_path,
+                {"FAKE_OFFERS_JSON": json.dumps(offers), "VAST_LIB_EST_HOURS": "2", "VAST_LIB_EST_DOWN_GB": "30", "VAST_LIB_EST_UP_GB": "0"})
+    rows = [line.split("\t") for line in r.stdout.splitlines()]
+    assert [row[0] for row in rows] == ["2", "1"], r.stdout
+    assert "預估 0.96 USD" in rows[0][1] and "預估 1.58 USD" in rows[1][1]
+    # 短跑（0.1 小時、5 GB）時 A 便宜：0.04+0.13=0.17 vs 0.048
+    r = run_lib('vast_lib_pick_offers "RTX 5090" 40 0.6', tmp_path,
+                {"FAKE_OFFERS_JSON": json.dumps(offers), "VAST_LIB_EST_HOURS": "0.1", "VAST_LIB_EST_DOWN_GB": "5", "VAST_LIB_EST_UP_GB": "0"})
+    assert [line.split("\t")[0] for line in r.stdout.splitlines()] == ["2", "1"]
+
+
+def test_pick_offers_drops_offers_over_inet_cost_cap(tmp_path: Path) -> None:
+    r = run_lib('vast_lib_pick_offers "RTX 5090" 40 0.6', tmp_path, {"FAKE_OFFERS_JSON": json.dumps(OFFERS)})
+    ids = [line.split("\t")[0] for line in r.stdout.splitlines()]
+    assert "8" not in ids and ids == ["1", "3"]
+    r = run_lib('vast_lib_pick_offers "RTX 5090" 40 0.6', tmp_path, {"FAKE_OFFERS_JSON": json.dumps(OFFERS), "VAST_LIB_MAX_INET_COST": "0.1"})
+    ids = [line.split("\t")[0] for line in r.stdout.splitlines()]
+    assert "8" in ids and ids[0] == "1"  # 放行了，但 0.3×0.3＋5×0.05 的預估比 1 貴，排後面

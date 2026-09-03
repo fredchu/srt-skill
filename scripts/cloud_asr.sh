@@ -38,6 +38,10 @@ if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
     # 拉映像訊息 STALL 分鐘沒變＝這台主機連不到映像來源，當成「直連沒生成」換一台。
     VAST_BOOT_WAIT_MIN="${VAST_BOOT_WAIT_MIN:-20}"
     VAST_BOOT_STALL_MIN="${VAST_BOOT_STALL_MIN:-5}"
+    # 挑報價用預估總費用排序（GPU 時數＋流量）。Breeze 拉模型＋套件約 6 GB、VV 約 10 GB，成果上傳很小。
+    export VAST_LIB_EST_HOURS="${VAST_LIB_EST_HOURS:-0.3}"
+    export VAST_LIB_EST_DOWN_GB="${VAST_LIB_EST_DOWN_GB:-$([[ "${ASR_MODE:-}" == vv ]] && echo 10 || echo 6)}"
+    export VAST_LIB_EST_UP_GB="${VAST_LIB_EST_UP_GB:-0.2}"
     CLOUD_ASR_DEFAULT_RATE_PER_HR=0.45
 fi
 RUNPOD_IMAGE="runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"

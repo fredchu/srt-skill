@@ -41,6 +41,17 @@ VAST_LIB_MIN_CUDA="${VAST_LIB_MIN_CUDA:-12.9}"
 # 官方文件也建議有穩定連線需求就過濾 static_ip=true（家用路由器的埠轉發壞掉＝直連永遠不通）。
 # 代價：當下 4090 16 台剩 6 台、5090 35 台剩 17 台，最便宜價差不到 0.03 美元。設 0 關掉。
 VAST_LIB_REQUIRE_STATIC_IP="${VAST_LIB_REQUIRE_STATIC_IP:-1}"
+# 報價排序用「這次跑的預估總費用」，不是每小時單價。Vast 的流量要錢（2026-09-03 實帳：一集 bookcast
+# GPU 0.04 美元、下載 5.21 GB 又 0.03 美元；book-translator 每次拉 10 GB 映像＋19 GB 模型，流量費會高過 GPU 費），
+# 而單價各主機從 0 到 0.039 美元／GB 都有。呼叫端依自己的流程設預估值：
+#   VAST_LIB_EST_HOURS    預估 GPU 時數（預設 0.3）
+#   VAST_LIB_EST_DOWN_GB  預估下載量（模型＋套件＋映像；預設 5）
+#   VAST_LIB_EST_UP_GB    預估上傳量（拉回成果；預設 0.5）
+#   VAST_LIB_MAX_INET_COST 流量單價上限（美元／GB，預設 0.03），超過的報價直接不列
+VAST_LIB_EST_HOURS="${VAST_LIB_EST_HOURS:-0.3}"
+VAST_LIB_EST_DOWN_GB="${VAST_LIB_EST_DOWN_GB:-5}"
+VAST_LIB_EST_UP_GB="${VAST_LIB_EST_UP_GB:-0.5}"
+VAST_LIB_MAX_INET_COST="${VAST_LIB_MAX_INET_COST:-0.03}"
 
 vast_lib_info() {
     printf '[vast] %s\n' "$*" >&2
@@ -95,7 +106,7 @@ vast_lib_cli() {
     "${cmd[@]}" "${pre[@]}" --raw ${post[@]+"${post[@]}"} 2>/dev/null
 }
 
-# 依規格挑報價。stdout＝一行一張，格式 "報價id<TAB>一行摘要"，時價由低到高；
+# 依規格挑報價。stdout＝一行一張，格式 "報價id<TAB>一行摘要"，依預估總費用由低到高（見 VAST_LIB_EST_*）；
 # 沒有符合的印空、rc 1。摘要跟 id 印在同一行，是因為呼叫端多半在 $(…) 裡呼叫，
 # 函式內設的全域變數傳不出去（bash 子殼），所以不能「先拿 id 再另外查摘要」。
 #   GPU        顯卡名，可含空白（"RTX 5090"），這裡會換成 Vast 查詢語法要的底線
@@ -123,14 +134,19 @@ vast_lib_pick_offers() {
     [[ -n "$extra" ]] && query="$query $extra"
     offers="$(vast_lib_cli search offers "$query" --order dph_total --limit 20)" || return 1
     # 伺服器端的 dph_total<= 只是提示，本機再濾一次：上限是錢的事，不能只信對方。
-    jq -r --argjson cap "$max_dph" --arg ipx "$ip_exclude" '
+    # 排序鍵 est＝GPU 時數費＋下載流量費＋上傳流量費（儲存費一次幾分錢，略）。摘要把流量單價與 est 一起印出來。
+    jq -r --argjson cap "$max_dph" --arg ipx "$ip_exclude" \
+          --argjson hours "$VAST_LIB_EST_HOURS" --argjson down "$VAST_LIB_EST_DOWN_GB" --argjson up "$VAST_LIB_EST_UP_GB" \
+          --argjson maxinet "$VAST_LIB_MAX_INET_COST" '
         ($ipx | split(",") | map(select(length > 0))) as $prefixes
         | (if type == "array" then . elif type == "object" and (.offers? | type == "array") then .offers else [] end)
         | map(select((.dph_total // 1e9) <= $cap))
         | map(select((.public_ipaddr // "") as $ip | any($prefixes[]; . as $p | $ip | startswith($p)) | not))
-        | sort_by(.dph_total)
+        | map(select(((.inet_down_cost // 0) <= $maxinet) and ((.inet_up_cost // 0) <= $maxinet)))
+        | map(. + {est: ((.dph_total // 0) * $hours + (.inet_down_cost // 0) * $down + (.inet_up_cost // 0) * $up)})
+        | sort_by(.est, .dph_total)
         | .[]
-        | "\(.id)\t\(.gpu_name) \(.dph_total | tostring | .[0:5]) USD/h \(.geolocation // "?") 可靠度 \(.reliability2 // .reliability // "?" | tostring | .[0:5]) 下載 \(.inet_down // "?" | tostring | .[0:5]) Mbps"
+        | "\(.id)\t\(.gpu_name) \(.dph_total | tostring | .[0:5]) USD/h 流量 \(.inet_down_cost // 0 | tostring | .[0:6])/GB 預估 \(.est | tostring | .[0:5]) USD \(.geolocation // "?") 可靠度 \(.reliability2 // .reliability // "?" | tostring | .[0:5]) 下載 \(.inet_down // "?" | tostring | .[0:5]) Mbps"
     ' <<<"$offers" 2>/dev/null | grep -v '^$' || return 1
 }
 
