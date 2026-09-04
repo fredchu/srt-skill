@@ -133,3 +133,19 @@ def test_unparseable_create_adopts_by_label_instead_of_retrying(tmp_path: Path) 
                                      "FAKE_CREATE_GARBAGE": "1", "MAX_POD_ATTEMPTS": "1"})
     assert sum(1 for c in calls if "create instance" in c) == 1, calls
     assert "adopting it" in log and "action=terminate result=success" in log
+
+
+def test_vv_mode_passes_larger_download_estimate_to_offer_ranking(tmp_path: Path) -> None:
+    # 預估下載量必須在 --vv 解析之後才算，否則 VV 永遠拿到 Breeze 的 6 GB
+    from test_cloud_asr_vv import _mock_env, _write, _run_cloud_asr, _make_wav  # type: ignore
+    from test_vast_upstream import _install_fake_vastai, _vastai_calls  # type: ignore
+    wav = _make_wav(tmp_path / "demo.wav"); out = tmp_path / "out"; out.mkdir()
+    raw = _write(tmp_path / "vv.json", json.dumps([{"start": 0.0, "end": 0.5, "text": "你好"}], ensure_ascii=False))
+    env = _mock_env(tmp_path, payload=raw, vv_env=_write(tmp_path / "e.json", "{}"), vv_run=_write(tmp_path / "r.json", json.dumps({"parts": 1, "segments": 1})))
+    env["CLOUD_ASR_PROVIDER"] = "vast"; env.update(_install_fake_vastai(tmp_path))
+    # 假 vastai 把環境變數記進 calls 需要改動太大；改直接驗 export 的值：用 --help 之外的最短路徑不行，
+    # 所以在 create 呼叫前用 VAST_LIB_EST_DOWN_GB 的可觀察效果：寫進 fake 的環境快照
+    fake = Path(env["VAST_LIB_CLI"]); fake.write_text(fake.read_text(encoding="utf-8").replace('printf \'%s\\n\' "$*" >>"$FAKE_CALLS"', 'printf \'%s DOWN=%s\\n\' "$*" "${VAST_LIB_EST_DOWN_GB:-}" >>"$FAKE_CALLS"'), encoding="utf-8")
+    _run_cloud_asr([str(wav), str(out), "demo", "zh", "--vv"], env=env)
+    search = next(c for c in _vastai_calls(tmp_path) if "search offers" in c)
+    assert search.endswith("DOWN=10"), search
