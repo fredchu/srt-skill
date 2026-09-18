@@ -215,6 +215,15 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/srt_extract_slides.py" \
 
 腳本內部流程：ffmpeg 每 60 秒截一幀 → imagehash 去重 → OCR/VLM 抽術語 → 輸出。
 
+> **去重門檻（hard rule，三次實測後 2026-09-18 入典）**：`--threshold` 預設 8 只適合「換頁時整個版面都變」的投影片。
+> **畫面骨架固定的素材一律 `--interval 20-30 --threshold 2-3`**——看盤軟體切個股（TradingView／Tiger Trade）、
+> 實務操作教學、講者全程停在同一份 PowerPoint 這三種都算：外框不動、只有中間圖表和數字在變，hash 距離落在門檻內就整批被判重複。
+> 三次實例：07-31 行情看法分享 84→13 幀（改後 169→126）；08-27 投資組合-4月-03 88→12 幀（改後 176→43）；
+> 09-18 重要實務操作補充 `--threshold 5` 183→64 幀、06:00–20:40 整段空白（改 `--threshold 2` 後 125 幀、最長空檔 160 秒）。
+> 跑完看 `Captions:` 數量與時間分布，去重後不到抽幀數三成、或連續 3 分鐘沒 caption 就重跑。
+> 用戶說「OCR 要做完整一點」＝直接用 `--interval 20 --threshold 2`。
+> 判準是「畫面上會變的區域佔多少比例」，不是有沒有投影片、不是片長。詳見 wiki `SRT Slide OCR Extraction`。
+
 **引擎（`--engine`，預設 `auto`）**：
 - `auto`（推薦）：全平台預設 **RapidOCR v3**（純 CPU、跨 macOS/Windows/Linux 含 VM/Docker；用 default PP-OCRv5 `ch` 模型，繁中+英文混合一起讀——實測勝專用 `chinese_cht` v3 模型）。安裝 `pip install "rapidocr>=3.9,<4" onnxruntime`。RapidOCR 不可用且在 macOS → 退回 Apple Vision（零安裝）。
 - `--engine apple-vision`：macOS 原生 OCR（零安裝，僅 macOS）。
@@ -278,6 +287,11 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/vv_longaudio.py" \
 ```
 
 先加 `--dry-run` 可只看切段計畫（JSON 印出 parts 與切點）不執行推理。
+
+> **32 GB 機器加 `--max-part-sec 1250`（每段約 20 分鐘）**。預設 3000 秒會把 61 分鐘切成兩段各 30 分鐘；
+> 2026-09-18 實測第二段解碼跑飛，進程吃到 24 GB＋6 GB 壓縮、每 10 秒換出 2 GB、25 分鐘零輸出，
+> 砍掉改三段 20 分鐘後 15 分鐘全部跑完。判「跑飛」看 `vm_stat` Swapouts 兩次相減與 `ps` CPU，不看 log 有沒有輸出。
+> ⚠️ 跑飛真因（KV cache 撐到 max_tokens）未驗證，詳見 wiki `VibeVoice`。
 
 產出：
 - `<檔名>_vibevoice.srt` — VV 的 SRT（備用）

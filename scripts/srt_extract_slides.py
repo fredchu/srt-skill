@@ -74,10 +74,17 @@ def deduplicate_frames(frames: list[tuple[str, float]], threshold: int = 8) -> l
 
     unique = []
     seen_hashes = []
+    # phash 依賴 scipy.fftpack；scipy 二進位壞掉（如 macOS 27 dyld 拒載）時退回純 numpy 的 dhash
+    hash_fn = imagehash.phash
+    try:
+        imagehash.phash(Image.new("L", (16, 16)))
+    except ImportError as e:
+        print(f"  ⚠ phash unavailable ({type(e).__name__}), falling back to dhash", flush=True)
+        hash_fn = imagehash.dhash
 
     for frame_path, time_s in frames:
         img = Image.open(frame_path)
-        h = imagehash.phash(img)
+        h = hash_fn(img)
 
         is_dup = any(h - prev_h < threshold for prev_h in seen_hashes)
         if not is_dup:
