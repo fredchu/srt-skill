@@ -93,6 +93,10 @@ Measured on a 109-minute episode: **US$0.17**. Setup and credentials: **[docs/CL
 
 The second row is "does not drop the window", not "more accurate" — on the same 30 seconds, local recovered 4 entries and the cloud recovered 13. The gap is that local never emitted the span, not that the two disagree about the words.
 
+### Korean subtitle track (optional)
+
+`scripts/srt_translate_ko.py run <final.srt> --out-dir <dir>/ko --glossary <zh-ko terms>` then `assemble`. Translates the corrected Traditional Chinese `.srt` into a Korean `.srt` for a separate YouTube caption track, keeping the original timing; the model may move text between adjacent cues because Korean is verb-final. Runs through `claude -p` (subscription quota, no API billing). The zh→ko glossary is user-specific, like `SRT_TERMS`.
+
 ### Bring your own glossary
 
 The terminology file (`SRT_TERMS`) is **user-specific and not shipped in this repo** — the default name (`terms_austin_v2.txt`) is just the original author's example. Point `SRT_TERMS` at a plain-text file of your own correction terms (one per line / domain-specific names, English terms, etc.); the pipeline grows it automatically via Step 3.
@@ -198,6 +202,10 @@ git clone <repo-url> ~/.claude/skills/srt
 
 第二列是「不丟窗口」不是「辨識更準」——同一段 30 秒音訊，本地補回 4 條、雲端補回 13 條，
 差別在本地整段沒吐出來，不是兩邊認得的字不同。
+
+### 韓文字幕軌（選用）
+
+`scripts/srt_translate_ko.py run <final.srt> --out-dir <dir>/ko --glossary <中韓術語表>` 再 `assemble`。把校正完的繁中 `.srt` 翻成韓文 `.srt`，給 YouTube 另一條字幕軌用；時間軸不動，模型可在相鄰條之間搬內容（韓文動詞在句尾）。走 `claude -p`（訂閱額度，不走 API 計費）。中韓術語表和 `SRT_TERMS` 一樣因人而異，不隨 repo 發佈。
 
 ### 自備術語表
 

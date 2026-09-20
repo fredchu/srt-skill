@@ -1,6 +1,6 @@
 ---
 name: srt
-version: 1.12.5
+version: 1.13.0
 description: >
   影片/音檔一鍵產出校正後的繁體中文字幕（YouTube 下載 → ASR → 預處理 → LLM 校正 → 後處理）。
   當用戶提到「做字幕」「跑字幕」「產字幕」「字幕 xxx」「srt」「這個影片要上字幕」「上字幕」，
@@ -123,6 +123,11 @@ ${SUBTITLE_DIR}/
 - **術語表**：預設 `terms_austin_v2.txt`。用戶指定其他講者 → 尋找對應術語表
 - **投影片文字**：用戶提供投影片檔（.txt 純文字，或 .pptx/.ppt PowerPoint）→ 啟用 Step 0.5 抽取本集術語
 - **特殊要求**：`--learn`（術語學習）、`--bilingual`（雙語輸出）
+- **韓文字幕**：用戶說「翻成韓文」「韓文字幕」→ 拿校正完的 `_2c_final.srt` 跑
+  `scripts/srt_translate_ko.py run <srt> --out-dir <dir>/ko --glossary "$SRT_KO_TERMS"`，再 `assemble` 組回。
+  走 `claude -p`（訂閱額度）、每批 80 條帶前後文 6 條、4 批並行，1541 條約 10 分鐘。時間軸不動，
+  模型可在相鄰條之間搬內容（韓文動詞在句尾）。完成後回報 `.qc.txt` 五項計數，並提醒沒有韓文母語者把關。
+  術語表 `SRT_KO_TERMS`（中<TAB>韓<TAB>備註）因人而異不進 repo；Austin 的在 For_Claude `scripts/subtitle/srt_correct/terms_austin_ko.txt`。
 - **LLM 模式**：預設 Sonnet subagent（雲端）。用戶提到 `--local` / 「用本地」/ 「離線」→ 用 Ollama gemma4:26b。需要 Ollama 已啟動且 gemma4:26b 已拉取
 
 ### quota gate（雲端 LLM 自動前置）
