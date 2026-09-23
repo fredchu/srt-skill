@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.14.0 - 2026-09-23
+
+### 新增
+
+- `srt_extract_slides.py` 支援 `.pdf` 投影片（Google 簡報匯出、財經M平方與群益講義）。跟 `.pptx` 一樣讀兩層：
+  `pdftotext` 文字層＋`pdftoppm` 每頁渲染後的 RapidOCR 文字（圖表標題、指標名只在像素層）。頁碼與純數字行
+  （如 `55.4`）不進術語表。需要 Poppler；缺 `pdftoppm`、渲染失敗或 OCR 失敗只印 warning、照常輸出文字層。
+  PDF 沒有時間戳，`--caption` 會被忽略。首跑群益 09-17 講座 59 頁：文字層 124 行＋OCR 1143 行，純數字行 0。
+
 ## 1.13.0 - 2026-09-20
 
 ### 新增
