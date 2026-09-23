@@ -619,9 +619,87 @@ def extract_pptx_text(pptx_path: str) -> tuple[list[str], list[str], int]:
     return unique_lines, ocr_lines, len(frames)
 
 
+def _has_word(line: str) -> bool:
+    """False for page numbers and bare figures (e.g. "55.4") that carry no terms."""
+    return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", line))
+
+
+def extract_pdf_text(pdf_path: str) -> tuple[list[str], list[str], int]:
+    """Extract embedded text and OCR text from a PDF slide deck."""
+    if shutil.which("pdftotext") is None:
+        raise RuntimeError(
+            "pdftotext not found. Install Poppler first: "
+            "macOS `brew install poppler`; Linux `sudo apt install poppler-utils`."
+        )
+
+    try:
+        text_result = subprocess.run(
+            ["pdftotext", pdf_path, "-"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()
+        raise RuntimeError(f"pdftotext failed{f': {detail}' if detail else ''}") from exc
+
+    lines = []
+    seen = set()
+    for line in text_result.stdout.splitlines():
+        line = fullwidth_latin_to_half(line).strip()
+        if line and _has_word(line) and line not in seen:
+            seen.add(line)
+            lines.append(line)
+
+    ocr_lines = []
+    if shutil.which("pdftoppm") is None:
+        _warn("pdftoppm not found; skipping PDF page OCR (install Poppler for chart/image text)")
+        return lines, ocr_lines, 0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        page_prefix = os.path.join(tmpdir, "page")
+        try:
+            subprocess.run(
+                ["pdftoppm", "-png", "-r", "150", pdf_path, page_prefix],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or "").strip()
+            _warn(f"pdftoppm failed, skipping PDF page OCR{f': {detail}' if detail else ''}")
+            return lines, ocr_lines, 0
+
+        page_files = [
+            name for name in os.listdir(tmpdir)
+            if name.startswith("page-") and name.endswith(".png")
+        ]
+        page_files.sort(key=lambda name: int(re.search(r"(\d+)\.png$", name).group(1)))
+        frames = [
+            (os.path.join(tmpdir, name), float(page_number))
+            for page_number, name in enumerate(page_files, 1)
+        ]
+
+        if frames:
+            try:
+                results = ocr_with_rapidocr(frames)
+            except RuntimeError as exc:
+                _warn(f"PDF page OCR failed: {exc}")
+                results = []
+
+            for result in results:
+                for line in result.get("raw", "").splitlines():
+                    line = line.strip()
+                    if line and _has_word(line) and line not in seen:
+                        seen.add(line)
+                        ocr_lines.append(line)
+
+    return lines, ocr_lines, len(frames)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract slide terminology from video")
-    parser.add_argument("video", help="Path to video file or .pptx/.ppt slide file")
+    parser.add_argument("video", help="Path to video file, .pptx/.ppt slide file, or PDF slide deck")
     parser.add_argument("--output", "-o", help="Output terms file path (default: <video_dir>/_slide_terms.txt)")
     parser.add_argument("--interval", type=int, default=60, help="Frame extraction interval in seconds (default: 60)")
     parser.add_argument("--threshold", type=int, default=8, help="Perceptual hash dedup threshold (default: 8)")
@@ -664,6 +742,32 @@ def main():
         print(f"  Slides: {video_path}", file=sys.stderr)
         print(f"  Extracted lines: {len(xml_lines)}", file=sys.stderr)
         print(f"  OCR lines: {len(ocr_lines)} (from {image_count} images)", file=sys.stderr)
+        print(f"  Output: {output_path}", file=sys.stderr)
+        return
+
+    if ext == ".pdf":
+        if args.caption:
+            print("PDF 無時間戳，忽略 --caption，只輸出 _slide_terms.txt", file=sys.stderr)
+
+        try:
+            text_lines, ocr_lines, page_count = extract_pdf_text(video_path)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("# 本集投影片術語（PDF 抽取：內嵌文字 + 頁面 OCR）\n")
+            f.write(f"# 抽取時間: {time.strftime('%Y-%m-%d %H:%M')}\n")
+            f.write("\n")
+            f.write("\n".join(text_lines))
+            if ocr_lines:
+                f.write("\n\n# 螢幕 OCR 文字（原始）\n")
+                f.write("\n".join(ocr_lines))
+
+        print("\n=== Done (PDF mode) ===", file=sys.stderr)
+        print(f"  Slides: {video_path}", file=sys.stderr)
+        print(f"  Extracted lines: {len(text_lines)}", file=sys.stderr)
+        print(f"  OCR lines: {len(ocr_lines)} (from {page_count} pages)", file=sys.stderr)
         print(f"  Output: {output_path}", file=sys.stderr)
         return
 

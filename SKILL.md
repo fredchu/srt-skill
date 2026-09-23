@@ -121,7 +121,7 @@ ${SUBTITLE_DIR}/
   安全雲 0.74）。開機走 `runpodctl --public-ip`（需本機裝 runpodctl）。回 `graphql error: no longer any instances`
   就加 `RUNPOD_GPU_TYPE_ID="NVIDIA GeForce RTX 5090"` 重試一次，再沒有就退回安全雲。
 - **術語表**：預設 `terms_austin_v2.txt`。用戶指定其他講者 → 尋找對應術語表
-- **投影片文字**：用戶提供投影片檔（.txt 純文字，或 .pptx/.ppt PowerPoint）→ 啟用 Step 0.5 抽取本集術語
+- **投影片文字**：用戶提供投影片檔（.txt 純文字、.pptx/.ppt PowerPoint，或 .pdf）→ 啟用 Step 0.5 抽取本集術語
 - **特殊要求**：`--learn`（術語學習）、`--bilingual`（雙語輸出）
 - **韓文字幕**：用戶說「翻成韓文」「韓文字幕」→ 拿校正完的 `_2c_final.srt` 跑
   `scripts/srt_translate_ko.py run <srt> --out-dir <dir>/ko --glossary "$SRT_KO_TERMS"`，再 `assemble` 組回。
@@ -204,6 +204,11 @@ cp "<原始路徑>" "${VIDEO_DIR}/"
   python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pptx>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt"
   ```
   輸出含 `# 螢幕 OCR 文字（原始）` 區塊（僅在有圖且 OCR 成功時）。**圖片層不可省**：K 線／看盤截圖裡的 ticker 與指標名在 XML 完全不存在（2026-07-15 實測 `67月.pptx`：8 圖補回 152 行，PLTR／MA300DIST／CME_MINI／NASDAQ／NQ／EURUSD 只在像素層）。RapidOCR 未安裝或 OCR 失敗只印 warning、照常輸出 XML 文字（OCR 是加分不是必需）。成本約 1 秒/圖。
+- `.pdf`（Google 簡報匯出、財經M平方等講義）→ 同一支腳本，同樣兩層：`pdftotext` 文字層＋`pdftoppm` 每頁渲染後的 RapidOCR 文字（圖表標題、指標名只在像素層）。頁碼與純數字行（如 `55.4`）自動濾掉。需要 Poppler（`brew install poppler`）；缺 `pdftoppm` 或 OCR 失敗只印 warning、照常輸出文字層。2026-09-23 實測群益 59 頁：文字層 124 行＋OCR 1143 行，約 1.5 秒/頁：
+  ```bash
+  python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pdf>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt"
+  ```
+  PDF 沒有時間戳：講者是在影片裡播投影片時，另外跑一次影片的自動擷取拿 `_slide_captions.json`（逐段畫面參考），兩者並用。
 
 **自動擷取**（無投影片文字檔時）：
 
@@ -391,7 +396,7 @@ python3 "${CORRECT_DIR}/srt_preprocess.py" "<ASR 產出的 SRT>" "<輸出路徑>
        --workdir "${VIDEO_DIR}" \
        --prompt-template "${CORRECT_DIR}/srt_correct_prompt.txt" \
        --terms "${TERMS}" \
-       --slide-terms "<pptx 抽出的 _slide_terms.txt，沒有就省略>" \
+       --slide-terms "<pptx/pdf 抽出的 _slide_terms.txt，沒有就省略>" \
        --vv-json "<VV JSON 路徑，沒跑 VV 才省略>" \
        --captions-json "<caption JSON 路徑，沒有就省略此參數>"
    ```
