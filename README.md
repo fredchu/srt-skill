@@ -31,7 +31,7 @@ YouTube link OR local video/audio
 
 Design highlights:
 - **Two-ASR cross-reference** — a primary ASR plus an optional VibeVoice pass; the LLM uses both to fix English terms and homophones. Run them **sequentially**: both extract audio to the same `<video>.wav`, and Step 1's cleanup deletes it, so running them at once can feed the primary ASR a truncated wav or leave VibeVoice with a missing file. Independent wav filenames are the real fix and are not implemented yet.
-- **Two-layer slide extraction** — a `.pptx` input is read on both layers: the OOXML text *and* the pixels of its embedded images. Chart screenshots routinely carry tickers and indicator names that appear nowhere in the XML, so text-only extraction misses them silently. OCR failure degrades to a warning — term extraction never hard-fails on it.
+- **Two-layer slide extraction** — a `.pptx` or `.pdf` input is read on both layers: the embedded text (OOXML, or the PDF text layer via Poppler `pdftotext`) *and* the pixels (embedded images, or every PDF page rendered with `pdftoppm`). Chart screenshots routinely carry tickers and indicator names that appear nowhere in the XML, so text-only extraction misses them silently. OCR failure degrades to a warning — term extraction never hard-fails on it.
 - **Structural quality gate** — the merge step rejects over-merged segments and auto-retries.
 - **Fail-loud ASR** — if the ASR step yields an empty/0-byte SRT (a known `mlx_whisper` `KeyError: 'words'` writer bug that discards output despite a successful transcription), the pipeline reconstructs the SRT from the captured verbose stdout, or hard-fails — it never silently reports success on an empty subtitle.
 - **Patch-region disclosure** — spans repaired by hallucination auto-fix or the Whisper fallback (clip-extract, re-transcribe, offset-and-stitch) are the highest timestamp-risk parts of the output, and whole-region drift is invisible to structural validation; the completion report lists each patched span and explicitly asks for a manual playback check. The Whisper fallback also passes `--word-timestamps` by default (word-level alignment re-times segment boundaries, eliminating a measured 2-4 s drift).
@@ -139,7 +139,7 @@ YouTube 連結 或 本地影片／音檔
 
 設計重點：
 - **雙路 ASR 交叉參考** — 主 ASR 加上選用的 VibeVoice；LLM 用兩者一起修正英文術語與同音字。兩者必須**序列執行**：它們抽到同一個 `<影片>.wav`，而 Step 1 的清理會刪掉它，同時跑可能讓主 ASR 讀到截斷的 wav、或讓 VibeVoice 找不到檔案。根治是各自獨立的 wav 檔名，尚未實作。
-- **投影片雙層抽取** — `.pptx` 輸入會同時讀兩層：OOXML 文字層**與**內嵌圖片的像素層。K 線截圖裡常有 XML 完全沒有的 ticker 與指標名，只抽文字會靜默漏掉。OCR 失敗降級為 warning——不會讓術語抽取整個掛掉。
+- **投影片雙層抽取** — `.pptx` 與 `.pdf` 輸入都會同時讀兩層：文字層（OOXML，或用 Poppler `pdftotext` 讀 PDF 文字層）**與**像素層（內嵌圖片，或用 `pdftoppm` 把每頁 PDF 畫成圖）。K 線截圖裡常有 XML 完全沒有的 ticker 與指標名，只抽文字會靜默漏掉。OCR 失敗降級為 warning——不會讓術語抽取整個掛掉。
 - **結構性品質 gate** — 合併步驟會擋下過度合併的段落並自動重派。
 - **ASR 失敗會出聲** — 若 ASR 步驟產出空／0-byte SRT（mlx_whisper 已知的 `KeyError: 'words'` 寫檔 bug：辨識其實成功卻丟棄輸出），pipeline 會從捕獲的 verbose stdout 重建 SRT，否則直接 hard-fail——絕不對空字幕靜默回報成功。
 - **ASR 補丁區揭露** — 幻覺自動修復與 Whisper fallback 補過的區段（截音檔獨立重跑＋偏移縫合）是全片時間軸風險最高處，整體漂移自動驗證抓不到；完成回報會逐段列出起止時間，明確提醒人工播放抽查。Whisper fallback 並預設帶 `--word-timestamps`（word 對齊重定 segment 邊界，實測消除 2-4 秒漂移）。
