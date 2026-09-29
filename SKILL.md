@@ -51,6 +51,7 @@ TERMS="${SRT_TERMS:-${DATA_DIR}/srt_correct/terms_austin_v2.txt}"
 ${SUBTITLE_DIR}/
 ├── subtitle.sh                          # Step 1: ASR
 ├── vv_longaudio.py                      # Step 1': VV 長音檔自動切段+合併（含 GPU flock）
+├── stage_timer.py                       # 分段計時：run/start/end/summary → ${VIDEO_DIR}/_timing.jsonl
 ├── srt_correct/
 │   ├── srt_correct_prompt.txt           # LLM system prompt
 │   ├── srt_preprocess.py                # Step 2a: 機械性預處理
@@ -160,6 +161,24 @@ mkdir -p "${VIDEO_DIR}"
 ```
 
 3. 後續所有步驟的 `<工作目錄>` 都用 `${VIDEO_DIR}`
+
+### 分段計時（每部影片必做，2026-09-29 起）
+
+每個階段都要記進 `${VIDEO_DIR}/_timing.jsonl`，完成後回報印出總表。目的是之後逐段找瓶頸、改良加速（2026-09-29 回頭查耗時，只能靠檔案 mtime 拼湊，唯一有計時的 Breeze log 還被清理刪掉）。
+
+```bash
+TIMER="python3 ${SUBTITLE_DIR}/stage_timer.py"
+# 能包成單一指令的階段：把原指令整個接在 -- 後面，結束碼原樣傳回，背景跑也適用
+${TIMER} run --workdir "${VIDEO_DIR}" breeze -- ./subtitle.sh "${VIDEO_DIR}/<影片>" --breeze
+# 包不成單一指令的階段（Agent subagent 批次、主 session 的查證判斷）：前後各記一筆
+${TIMER} start --workdir "${VIDEO_DIR}" correct_2b
+${TIMER} end   --workdir "${VIDEO_DIR}" correct_2b          # 失敗加 --status failed
+${TIMER} summary --workdir "${VIDEO_DIR}"                    # 完成後回報用
+```
+
+- 原本是 `cd X && python3 ...` 的，寫成 `cd X && ${TIMER} run --workdir ... <stage> -- python3 ...`；`run` 是前景阻塞，不違反「背景啟動＋等待契約」
+- 階段名固定用這組，跨影片才能比：`download`、`ocr`（重跑記 `ocr_rerun`）、`breeze`、`vv`、`hallucination_fix`、`preprocess`、`prepare_segments`、`correct_2b`（派出到全部回來）、`merge`（重派另記 `correct_2b_retry`）、`review_2c`（派出到全部回來）、`postprocess`、`noun_check_2d`、`mux`、`learn_terms`
+- 在等某階段時空轉（例如 VV 跑完還在等 OCR 重跑），不另記；總表上兩段的起訖時間自然看得出來
 
 ### Step 0 (YouTube only): 下載影片
 
@@ -825,6 +844,7 @@ rm -f "${VIDEO_DIR}/<影片檔名同名>.wav"
 - 最終成品（`_2c_final.srt`）— 經後處理（時間軸還原+強制拆句）的最終版
 - 字幕影片（`_sub.mkv`，如有）
 - 投影片術語（`_slide_terms.txt`，如有）
+- 分段計時紀錄（`_timing.jsonl`）— **不清理**，跨影片比較耗時的唯一依據
 - 名詞查證 sidecar（`_seg_*_uncertain.json`，如有）— **刻意不清理**：它是 Step 2d 未收斂項的唯一稽核材料（原詞／時間／上下文／候選），刪掉就無法回溯「當初為什麼判 L3」。它長得像暫存檔，但不是 — 不要順手加回上面的清理清單。
 - 名詞查證稽核紀錄（`_sidecar_audit.json`，如有）— **同樣刻意不清理**：sidecar 的 hash 錨點（`_seg_*_corrected.srt`）在本步被刪除後，這是唯一還能證明「這些 sidecar 當初通過新鮮度檢查」的憑證。
 
@@ -837,7 +857,7 @@ rm -f "${VIDEO_DIR}/<影片檔名同名>.wav"
 - **未收斂項一律按時間順序由前到後列出**（2026-08-15 用戶要求）：不要按 sidecar 檔案順序、不要按段號、不要按證據層級分組。用戶是拿這份清單逐條回聽原音裁決的，時間亂跳會讓他在時間軸上來回找。每列一行 `HH:MM:SS ｜ 字幕現況 ｜ 我怎麼判斷（改了：原本→現在＋理由；或沒改＋理由）`，清單標題寫明「已按判斷處理，供之後回聽」，極性相反（一路有「不」另一路沒有）的項目要標出來，那類最容易看走眼。
 - **ASR 補丁區（如有）：逐段列出起止時間，明確提醒用戶播放該區段人工確認時間軸與內容銜接**——含 Step 1.5 的 Breeze 自動修復區與 Whisper fallback 區，兩者機制相同（截音檔獨立重跑＋偏移計算 patch 回去），是全片時間軸風險最高處，自動驗證抓不到整體漂移（沒有補丁則不用提）
 - 術語學習結果：新增了哪些術語/preprocess 規則，或「無新術語」
-- 總耗時
+- 分段耗時：貼 `stage_timer.py summary` 的輸出表（含 TOTAL），並點出最花時間的一兩段
 
 **subagent 回報的時間軸不可信，一律重新 grep**（2026-08-14/15 技術分析-8月-03～05 三集連續實證）：
 同一批校正/複查 subagent 反覆出現時間偏移，型態有三種——**整整差一小時**（8月-03 段 9 把
