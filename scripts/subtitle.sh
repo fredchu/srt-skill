@@ -502,5 +502,5 @@ fi
 echo "  ⏱️  總耗時：$(format_duration $TOTAL_ELAPSED)"
 echo "  📊 音檔長度：$(format_duration $DURATION) → 處理速度 $(( DURATION / (TOTAL_ELAPSED > 0 ? TOTAL_ELAPSED : 1) ))x 即時"
 echo ""
-echo -e "${YELLOW}  📋 下一步：把 SRT 丟進 Claude (Sonnet 4) 用字幕修正模板校對${NC}"
+echo -e "${YELLOW}  📋 下一步：把 SRT 丟進 Claude (Sonnet) 用字幕修正模板校對${NC}"
 echo ""
