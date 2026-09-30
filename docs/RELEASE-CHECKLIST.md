@@ -40,9 +40,10 @@ ssh <目標機器> '
   python scripts/asr_capacity_check --no-cache                   # 探針能跑
   env -u SRT_ASR_ENGINE bash scripts/subtitle.sh <某個檔>        # 沒指定引擎時的訊息對不對
 
-  # 花錢的一項（約 US$0.02）
-  bash scripts/subtitle.sh <60秒的clip> --breeze --engine=runpod
-  bash scripts/runpod_reap.sh                                    # 確認機器砍乾淨
+  # 花錢的一項（約 US$0.05–0.1）
+  bash scripts/subtitle.sh <60秒的clip> --breeze --engine=cloud  # 預設路線：Vast 優先
+  bash scripts/subtitle.sh <60秒的clip> --breeze --engine=runpod # 備援那家單獨也要能跑
+  bash scripts/vast_reap.sh && bash scripts/runpod_reap.sh       # 兩家都確認機器砍乾淨
 '
 ```
 
