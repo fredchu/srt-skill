@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.16.0 - 2026-09-30
+
+### 新增
+
+- **雲端 ASR 改 Vast 優先、RunPod 備援。** 新引擎值 `cloud`（`--engine=cloud`／`SRT_ASR_ENGINE=cloud`），
+  `cloud_asr.sh` 不設 `CLOUD_ASR_PROVIDER` 時預設 `auto`：先跑 Vast，只有 Vast 以結束碼 **75**
+  （沒有可用機器：無報價、開機失敗、SSH 就緒次數用完、CUDA 不可用，或 Vast 沒設定——沒金鑰、
+  沒裝 `vastai`、帳號沒掛 SSH 公鑰）結束時才改跑 RunPod。辨識開始後的錯誤、或 Vast 機器刪不掉
+  （可能還在計費）一律不換家。明確指定 `vast`／`runpod` 只用那一家，設定缺了照常報錯。
+  真機實測：auto 走 Vast 台灣 RTX 5090；`VAST_MAX_DPH=0.01` 逼出無報價後自動改 RunPod，兩家皆收屍確認。
+- `scripts/seg_watchdog.py`：Step 2b/2c 平行 subagent 派出後的背景監看。輸出檔非空、`.srt` 含 `-->`、
+  比 launch marker 新才算到齊；全到 exit 0、逾時 exit 3 並列出卡住的段供重派；每輪寫
+  `_watchdog_status.json`。起因 2026-07-03 7 小時片有一段 subagent 卡死 10 分鐘沒人發現。
+- preprocess 新增 2 條規則：`全值指→加權指`、`再試會→債市會`（排除「再試會兒」）。86 部素材全語料回歸零誤傷。
+
+### 變更
+
+- Vast 單台 SSH publickey 被拒改為換下一台，錯誤訊息不再叫人重登金鑰
+  （2026-09-30 帳號金鑰與本機相同，維吉尼亞主機被拒、台灣主機一次過）。Vast 路徑的訊息不再印成「RunPod pod」。
+- 互斥表：本地 Breeze 與**雲端** VibeVoice（`cloud_asr.sh --vv`）可並行（雲端版唯讀影片、在自己的暫存資料夾轉 flac，
+  不碰 `<影片檔名>.wav`），長片（≥ 3 小時）預設走這個組合、VibeVoice 全片都跑。
+- 分段計時改成每次寫完整指令：`TIMER="python3 …"` 變數在 zsh 不做字詞切分，會變成 no such file（10 分鐘演練實測）。
+
+### 文件
+
+- `docs/CLOUD-ASR-SETUP.md` 補 Vast 設定（`vastai` CLI、API 金鑰、SSH 公鑰、收屍）、換家規則、VibeVoice 雲端路徑，
+  移除過時的「VibeVoice 還不能上雲」；驗證範圍分開標示（RunPod 在 8 GB／bash 3.2 的 Mini CC 實跑，Vast 只在 32 GB 機器實跑）。
+- `docs/WINDOWS.md` 中文段原本沒提雲端，與英文段同步；`docs/RELEASE-CHECKLIST.md` 實跑項改測預設路線並兩家都收屍。
+
 ## 1.15.0 - 2026-09-29
 
 ### 新增
