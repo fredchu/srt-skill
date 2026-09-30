@@ -22,7 +22,8 @@ YouTube 連結 或 本地影片/音檔
   ↓ Step 0.5 (if 投影片文字): 抽取本集術語補充表
 本地影片檔
   ↓ Step 1:  subtitle.sh (Breeze ASR)          ← 先跑完這個
-  ↓ Step 1': vibevoice_asr.py (VV ASR)         ← 再跑；不可與 Step 1 並行（搶同一個 wav）
+  ↓ Step 1': vibevoice_asr.py (VV ASR)         ← 再跑；本地 VV 不可與 Step 1 並行（搶同一個 wav）
+                                                  雲端 VV（cloud_asr.sh --vv）可與本地 Breeze 並行
 原始 SRT (.srt) + VV JSON
   ↓ Step 1.5: srt_hallucination_fix.py (幻覺偵測+自動修復)
   ↓ Step 2a: srt_preprocess.py → _2a_preprocessed.srt
@@ -69,6 +70,7 @@ ${SUBTITLE_DIR}/
 | 組合 | 可否並行 |
 |------|---------|
 | Breeze ASR + VibeVoice | ❌ 不可 — **兩者搶同一個 `<影片檔名>.wav`**（`subtitle.sh` 清理會刪掉它，`vibevoice_asr.py` 抽取同一路徑）。已出事兩次（2026-07-17 技術分析-6月-03：Breeze 只轉出 4.6/51.8 分鐘；2026-08-01 淡定 2026）。**先跑完 Breeze 再啟動 VV**；根治（各自獨立 wav 檔名）未實作。記憶體層面兩者確實不會 OOM（wiki `subtitle-pipeline` 第 313 行），但那不涵蓋這個搶檔 race |
+| 本地 Breeze + **雲端** VibeVoice（`cloud_asr.sh --vv`） | ✅ 可 — 雲端版直接讀影片（唯讀），在自己的 `mktemp` 暫存資料夾轉 `.flac`，不碰 `<影片檔名>.wav`；輸出是 `<basename>_vibevoice.*`，與 Breeze 的 `<basename>.srt` 不同名。2026-09-30 10 分鐘演練實測（RunPod）：Breeze 45 秒、雲端 VV 3 分 33 秒同時完成，兩邊產出完整。**長片（≥ 3 小時）預設走這個組合**，VV 簡報與 Q&A 全片都跑，不再因為本地 VV 太久只跑前段 |
 | 兩個 VibeVoice instance | ❌ 不可（vv_longaudio.py 內建 flock 鎖強制序列） |
 | 兩部影片同時跑 ASR（2×Breeze+2×VV） | ❌ 不可 — 多影片時 ASR 階段逐部排隊，前一部進入 Step 2 後下一部才開始 ASR |
 | RapidOCR（Step 0.5，預設）+ 任一 ASR | ✅ 可（RapidOCR 純 CPU，不搶 MLX GPU） |
@@ -86,7 +88,7 @@ ${SUBTITLE_DIR}/
 - VibeVoice 是選用參考。進程消失但沒有有效 VV SRT/JSON 時，擷取 log/exit code 記 warning，跳過 VV 交叉參考繼續；絕不無限等。
 - OCR/caption 依 slide-ref 是否為本次必要輸入比照處理；選用 caption 失敗時記 warning 並略過 caption ref。
 
-並行邊界按引擎判斷：**Breeze 與 VibeVoice 不可並行**——兩者搶同一個 `<影片檔名>.wav`，見上方互斥表（記憶體層面確實不會 OOM，但那不涵蓋搶檔 race）；RapidOCR（純 CPU）可與 ASR 並行；VLM caption（`--engine ollama/mlx` 或顯式 VLM model）必須序列在 GPU ASR 之後，不能籠統宣稱 Step 0.5 可與 ASR 並行。
+並行邊界按引擎判斷：**Breeze 與本地 VibeVoice 不可並行**——兩者搶同一個 `<影片檔名>.wav`，見上方互斥表；本地 Breeze 與雲端 VV（`cloud_asr.sh --vv`）可並行（記憶體層面確實不會 OOM，但那不涵蓋搶檔 race）；RapidOCR（純 CPU）可與 ASR 並行；VLM caption（`--engine ollama/mlx` 或顯式 VLM model）必須序列在 GPU ASR 之後，不能籠統宣稱 Step 0.5 可與 ASR 並行。
 
 `ScheduleWakeup` 是 Pro CC（主 session）專屬，用於 quota-wait 或顯式 resume。Codex / 本地 worker 不能呼叫；背景等待只能留下可續產物或 retry marker，然後用手動/status 回查恢復。
 
@@ -271,7 +273,7 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/srt_extract_slides.py" \
 
 VibeVoice 做輔助 ASR，產出供 Step 2b 交叉參考。
 
-> ⚠️ **不要與 Step 1 並行**：兩者都把音檔抽到 VIDEO_DIR 內同一個 `<影片檔名>.wav`，`subtitle.sh` 清理時會刪掉它，`vibevoice_asr.py` 抽取的是同一路徑。並行時 Breeze 可能讀到被覆寫中的截斷 wav（2026-07-17：只轉出 4.6/51.8 分鐘，條數檢查放行、靠尾端時間戳才抓到），或 VV 因檔案被刪 FileNotFoundError。**等 Breeze 完成再啟動 VV**。根治是各自獨立 wav 檔名，未實作。
+> ⚠️ **本地 VV 不要與 Step 1 並行**（雲端 VV 不受此限，見下節與互斥表）：兩者都把音檔抽到 VIDEO_DIR 內同一個 `<影片檔名>.wav`，`subtitle.sh` 清理時會刪掉它，`vibevoice_asr.py` 抽取的是同一路徑。並行時 Breeze 可能讀到被覆寫中的截斷 wav（2026-07-17：只轉出 4.6/51.8 分鐘，條數檢查放行、靠尾端時間戳才抓到），或 VV 因檔案被刪 FileNotFoundError。**等 Breeze 完成再啟動 VV**。根治是各自獨立 wav 檔名，未實作。
 
 #### VibeVoice 也可以走雲端（v1.9.0 起）
 
