@@ -30,7 +30,8 @@ case "${ASR_ENGINE}" in
   mlx) ;;
   runpod) ASR_ENGINE_IS_CLOUD=true; ENGINE_LABEL="RunPod" ;;
   vast)   ASR_ENGINE_IS_CLOUD=true; ENGINE_LABEL="Vast.ai" ;;
-  *) echo "ERROR: 未知引擎：${ASR_ENGINE}（可用 mlx、runpod 或 vast）" >&2; exit 1 ;;
+  cloud)  ASR_ENGINE_IS_CLOUD=true; ENGINE_LABEL="Cloud" ;;
+  *) echo "ERROR: 未知引擎：${ASR_ENGINE}（可用 mlx、cloud、runpod 或 vast）" >&2; exit 1 ;;
 esac
 
 WORK_DIR="$(dirname "$SRT_FILE")"
@@ -83,7 +84,7 @@ if [ "${ASR_ENGINE_IS_CLOUD}" = true ]; then
   if [ -n "$INITIAL_PROMPT" ]; then
     CLOUD_ARGS+=(--initial-prompt "$INITIAL_PROMPT")
   fi
-  if ! CLOUD_ASR_PROVIDER="${ASR_ENGINE}" bash "${CLOUD_ARGS[@]}"; then
+  if ! CLOUD_ASR_PROVIDER="$([ "$ASR_ENGINE" = cloud ] && echo auto || echo "$ASR_ENGINE")" bash "${CLOUD_ARGS[@]}"; then
     rm -f "$FIX_WAV"
     exit 1
   fi

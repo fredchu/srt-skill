@@ -188,8 +188,8 @@ def run_asr(wav_path, output_dir, use_breeze=True):
 
     asr_engine = os.environ.get('SRT_ASR_ENGINE')
     # runpod 與 vast 都是「每次呼叫開一台機器」的雲端引擎，規則一樣：獨立 call 目錄、失敗即停、逾時先 SIGTERM
-    asr_is_cloud = asr_engine in ('runpod', 'vast')
-    engine_label = {'runpod': 'RunPod', 'vast': 'Vast.ai'}.get(asr_engine or '', asr_engine)
+    asr_is_cloud = asr_engine in ('cloud', 'runpod', 'vast')
+    engine_label = {'cloud': 'Cloud', 'runpod': 'RunPod', 'vast': 'Vast.ai'}.get(asr_engine or '', asr_engine)
     asr_wav_path = wav_path
     asr_output_dir = output_dir
     if asr_is_cloud:

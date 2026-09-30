@@ -9,14 +9,23 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # trap、換機重試、費用上限、每次嘗試的紀錄留在這裡——那些是這支腳本自己的契約。
 # shellcheck source=runpod_pod_lib.sh
 source "$SCRIPT_DIR/runpod_pod_lib.sh"
-# 平台：runpod（預設）或 vast。兩邊只差「開機、查紀錄、SSH 位置、存活清單、砍機」，
+# 平台：auto（預設先 vast、無可用機器才 runpod）、runpod 或 vast。兩邊只差「開機、查紀錄、SSH 位置、存活清單、砍機」，
 # 收在下方 provider 分岔；換機重試、費用上限、trap、證據檔全部共用（2026-09-03 接上，
 # 跟 bookcast 0.3.8 同一套；踩過的坑見 vast_instance_lib.sh 與 CHANGELOG 1.12.0）。
-CLOUD_ASR_PROVIDER="${CLOUD_ASR_PROVIDER:-runpod}"
+CLOUD_ASR_PROVIDER="${CLOUD_ASR_PROVIDER:-auto}"
 case "$CLOUD_ASR_PROVIDER" in
+    auto)
+        # Child processes isolate provider state. Only capacity exhaustion permits fallback.
+        if CLOUD_ASR_PROVIDER=vast bash "$0" "$@"; then exit 0; else status=$?; fi
+        if [[ $status -ne 75 ]]; then exit "$status"; fi
+        printf '[cloud_asr.sh] Vast.ai has no usable machine; trying RunPod\n' >&2
+        exec env CLOUD_ASR_PROVIDER=runpod bash "$0" "$@"
+        ;;
     runpod|vast) ;;
-    *) printf '[cloud_asr.sh] ERROR: CLOUD_ASR_PROVIDER must be runpod or vast: %s\n' "$CLOUD_ASR_PROVIDER" >&2; exit 2 ;;
+    *) printf '[cloud_asr.sh] ERROR: CLOUD_ASR_PROVIDER must be auto, runpod or vast: %s\n' "$CLOUD_ASR_PROVIDER" >&2; exit 2 ;;
 esac
+PROVIDER_MACHINE_LABEL="RunPod pod"
+[[ "$CLOUD_ASR_PROVIDER" == vast ]] && PROVIDER_MACHINE_LABEL="Vast.ai instance"
 CLOUD_ASR_DEFAULT_RATE_PER_HR=0.751
 if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
     # shellcheck source=vast_instance_lib.sh
@@ -206,7 +215,7 @@ Environment:
   CLOUD_VV_FAIL_STEP       Optional VV fault injection hook; set to inference to fail before remote generate.
   CLOUD_ASR_TEST_HOOK      Mock hook: provisioning_retry, delete_failure, signal_cleanup.
   COST_CAP_USD             Override per-call budget cap (default: ${COST_CAP_USD}).
-  CLOUD_ASR_PROVIDER       runpod (default) or vast.
+  CLOUD_ASR_PROVIDER       auto (default), runpod or vast.
   VAST_API_KEY             Vast.ai key (or ~/.config/vastai/vast_api_key). vastai CLI required.
   VAST_GPU / VAST_MAX_DPH  Offer filter for vast (default: RTX 5090, 0.6 USD/h cap).
   VAST_GEO_EXCLUDE / VAST_IP_EXCLUDE / VAST_EXTRA_QUERY / VAST_MAX_OFFER_TRIES / VAST_IMAGE / VAST_DISK_GB / VAST_VENV
@@ -234,6 +243,13 @@ error() {
 die() {
     error "$1"
     exit "${2:-1}"
+}
+
+no_vast_machine() { die "$1" 75; }
+
+no_direct_endpoint() {
+    if [[ "$CLOUD_ASR_PROVIDER" == vast ]]; then no_vast_machine "$1"; fi
+    die "$1"
 }
 
 # 共用檔的三個 log 函式接回這支腳本的格式（帶時間戳的 [cloud_asr.sh] 前綴）。
@@ -608,7 +624,7 @@ create_instance_vast() {
     local rows tries=0 offer_id offer_desc out
     info "searching Vast.ai offers gpu=$VAST_GPU cap=${VAST_MAX_DPH}USD/h disk=${VAST_DISK_GB}GB image=$VAST_IMAGE"
     rows="$(vast_lib_pick_offers "$VAST_GPU" "$VAST_DISK_GB" "$VAST_MAX_DPH" "$VAST_GEO_EXCLUDE" "$VAST_EXTRA_QUERY" "$VAST_IP_EXCLUDE")" \
-        || die "no Vast.ai offer matches (gpu=$VAST_GPU cap=${VAST_MAX_DPH} geo_exclude=${VAST_GEO_EXCLUDE:-none} ip_exclude=${VAST_IP_EXCLUDE:-none}); relax VAST_MAX_DPH or change VAST_GPU"
+        || no_vast_machine "no Vast.ai offer matches (gpu=$VAST_GPU cap=${VAST_MAX_DPH} geo_exclude=${VAST_GEO_EXCLUDE:-none} ip_exclude=${VAST_IP_EXCLUDE:-none}); relax VAST_MAX_DPH or change VAST_GPU"
     while IFS=$'\t' read -r offer_id offer_desc; do
         [[ -n "$offer_id" ]] || continue
         tries=$((tries + 1))
@@ -627,7 +643,7 @@ create_instance_vast() {
         info "offer $offer_id could not be rented (${out:-<empty>}); trying next"
         append_pod_attempt_log "attempt=${ATTEMPT} offer=${offer_id} action=create result=offer_failed error=$(tr -d '\n' <<<"${out:-<empty>}")"
     done <<<"$rows"
-    die "Vast.ai instance creation failed after ${tries} offer(s)"
+    no_vast_machine "Vast.ai instance creation failed after ${tries} offer(s)"
 }
 
 create_pod() {
@@ -772,9 +788,9 @@ wait_for_instance_running() {
 terminate_pod_once() {
     if provider_terminate_once; then
         POD_TERMINATED=true
-        info "confirmed RunPod pod id=$POD_ID absent from list after delete"
+        info "confirmed ${PROVIDER_MACHINE_LABEL} id=$POD_ID absent from list after delete"
         append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=terminate result=success cumulative_billable_seconds=${TOTAL_BILLABLE_SECONDS}"
-        info "terminated RunPod pod id=$POD_ID"
+        info "terminated ${PROVIDER_MACHINE_LABEL} id=$POD_ID"
         return 0
     fi
     append_pod_attempt_log "attempt=${ATTEMPT} pod_id=${POD_ID} action=terminate result=failure cumulative_billable_seconds=${TOTAL_BILLABLE_SECONDS} error=${TERMINATE_LAST_ERROR}"
@@ -795,15 +811,15 @@ terminate_pod() {
             return 0
         fi
         if (( attempt < POD_TERMINATE_ATTEMPTS )); then
-            info "RunPod pod termination attempt $attempt/$POD_TERMINATE_ATTEMPTS failed for id=$POD_ID; retrying in ${POD_TERMINATE_BACKOFF_SECONDS}s"
+            info "${PROVIDER_MACHINE_LABEL} termination attempt $attempt/$POD_TERMINATE_ATTEMPTS failed for id=$POD_ID; retrying in ${POD_TERMINATE_BACKOFF_SECONDS}s"
             sleep "$POD_TERMINATE_BACKOFF_SECONDS"
         fi
     done
 
     if [[ -n "$TERMINATE_LAST_ERROR" ]]; then
-        error "RunPod pod termination failed for id=$POD_ID after $POD_TERMINATE_ATTEMPTS attempts: $TERMINATE_LAST_ERROR"
+        error "${PROVIDER_MACHINE_LABEL} termination failed for id=$POD_ID after $POD_TERMINATE_ATTEMPTS attempts: $TERMINATE_LAST_ERROR"
     else
-        error "RunPod pod termination failed for id=$POD_ID after $POD_TERMINATE_ATTEMPTS attempts: no supported termination request was confirmed"
+        error "${PROVIDER_MACHINE_LABEL} termination failed for id=$POD_ID after $POD_TERMINATE_ATTEMPTS attempts: no supported termination request was confirmed"
     fi
     return 1
 }
@@ -812,7 +828,8 @@ handle_ssh_auth_failure() {
     local host="$1"
     local port="$2"
     if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
-        error "Permission denied (publickey) when connecting to root@$host -p $port. Register the key on Vast.ai: vastai create ssh-key \"\$(cat $SSH_PUBLIC_KEY_PATH)\""
+        # 2026-09-30 實測：帳號金鑰與本機相同仍在單一主機被拒，換一台就過；不要叫人去重登金鑰。
+        error "Permission denied (publickey) on Vast.ai host root@$host -p $port; the account key is registered (check: vastai show ssh-keys), trying the next machine"
     else
         error "Permission denied (publickey) when connecting to root@$host -p $port. Register the account-level SSH public key in https://console.runpod.io/user/settings and ensure $SSH_PRIVATE_KEY.pub is uploaded."
     fi
@@ -825,6 +842,10 @@ ssh_probe_ready() {
     local status output
 
     if [[ -n "${CLOUD_ASR_TEST_HOOK:-}" ]]; then
+        if [[ "${MOCK_PROBE_AUTH_DENIED:-0}" == 1 ]]; then
+            handle_ssh_auth_failure "$host" "$port"
+            return 42
+        fi
         return 0
     fi
 
@@ -1036,7 +1057,7 @@ wait_for_ssh_ready() {
             fi
             info "SSH endpoint present but not ready yet at root@$ip -p $port"
         else
-            info "waiting for RunPod SSH endpoint to appear for pod $POD_ID"
+            info "waiting for ${PROVIDER_MACHINE_LABEL} SSH endpoint to appear for pod $POD_ID"
         fi
 
         now="$(date +%s)"
@@ -1606,7 +1627,7 @@ run_vv_mode() {
     while :; do
         ATTEMPT=$((ATTEMPT + 1))
         if (( ATTEMPT > MAX_POD_ATTEMPTS )); then
-            die "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
+            no_direct_endpoint "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
         fi
 
         create_pod
@@ -1627,14 +1648,18 @@ run_vv_mode() {
                 die "timed out waiting for direct SSH on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
             fi
             if (( ATTEMPT >= MAX_POD_ATTEMPTS )); then
-                die "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
+                no_direct_endpoint "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
             fi
             continue
         fi
 
         if [[ $status -eq 42 ]]; then
             if ! terminate_pod; then
-                die "SSH public key denied by RunPod backend after pod $POD_ID could not be terminated: ${TERMINATE_LAST_ERROR:-<unknown>}"
+                die "SSH public key denied by ${PROVIDER_MACHINE_LABEL} after pod $POD_ID could not be terminated: ${TERMINATE_LAST_ERROR:-<unknown>}"
+            fi
+            if [[ "$CLOUD_ASR_PROVIDER" == vast ]]; then
+                info "SSH public key denied on Vast.ai instance $POD_ID; trying next machine"
+                continue
             fi
             die "SSH public key denied by RunPod backend"
         fi
@@ -1657,7 +1682,7 @@ run_vv_mode() {
                 if ! terminate_pod; then
                     die "torch.cuda.is_available() returned False on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
                 fi
-                die "torch.cuda.is_available() returned False on pod $POD_ID"
+                no_direct_endpoint "torch.cuda.is_available() returned False on pod $POD_ID"
                 ;;
             *)
                 if ! terminate_pod; then
@@ -1916,8 +1941,8 @@ cleanup() {
             info "cleaning up pod id=$POD_ID"
             if ! terminate_pod; then
                 preserve_tmp_dir=true
-                error "CLEANUP FAILURE: RunPod pod id=$POD_ID could not be terminated after $POD_TERMINATE_ATTEMPTS attempts; leaving pod id intact for manual cleanup"
-                if [[ "$status" -eq 0 ]]; then
+                error "CLEANUP FAILURE: ${PROVIDER_MACHINE_LABEL} id=$POD_ID could not be terminated after $POD_TERMINATE_ATTEMPTS attempts; leaving pod id intact for manual cleanup"
+                if [[ "$status" -eq 0 || "$status" -eq 75 ]]; then
                     status=1
                 fi
             fi
@@ -2147,7 +2172,7 @@ ATTEMPT=0
 while :; do
     ATTEMPT=$((ATTEMPT + 1))
     if (( ATTEMPT > MAX_POD_ATTEMPTS )); then
-        die "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
+        no_direct_endpoint "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
     fi
 
     create_pod
@@ -2167,14 +2192,18 @@ while :; do
             die "timed out waiting for direct SSH on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
         fi
         if (( ATTEMPT >= MAX_POD_ATTEMPTS )); then
-            die "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
+            no_direct_endpoint "direct endpoint unavailable after ${MAX_POD_ATTEMPTS} pod(s); giving up"
         fi
         continue
     fi
 
     if [[ $status -eq 42 ]]; then
         if ! terminate_pod; then
-            die "SSH public key denied by RunPod backend after pod $POD_ID could not be terminated: ${TERMINATE_LAST_ERROR:-<unknown>}"
+            die "SSH public key denied by ${PROVIDER_MACHINE_LABEL} after pod $POD_ID could not be terminated: ${TERMINATE_LAST_ERROR:-<unknown>}"
+        fi
+        if [[ "$CLOUD_ASR_PROVIDER" == vast ]]; then
+            info "SSH public key denied on Vast.ai instance $POD_ID; trying next machine"
+            continue
         fi
         die "SSH public key denied by RunPod backend"
     fi
@@ -2197,7 +2226,7 @@ if cuda_probe_output="$(ssh_run_script "cuda_check" "$POD_IP" "$POD_PORT" "$REMO
             if ! terminate_pod; then
                 die "torch.cuda.is_available() returned False on pod $POD_ID and termination failed: ${TERMINATE_LAST_ERROR:-<unknown>}"
             fi
-            die "torch.cuda.is_available() returned False on pod $POD_ID"
+            no_direct_endpoint "torch.cuda.is_available() returned False on pod $POD_ID"
             ;;
         *)
             if ! terminate_pod; then

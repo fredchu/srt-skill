@@ -134,7 +134,7 @@ for arg in "$@"; do
             MODEL="mlx-community/whisper-large-v3-turbo"
             ;;
         --engine)
-            print_error "--engine 需要用 --engine=<mlx|runpod|vast> 的形式"
+            print_error "--engine 需要用 --engine=<mlx|cloud|runpod|vast> 的形式"
             exit 1
             ;;
         --engine=*)
@@ -171,8 +171,8 @@ done
 ASR_ENGINE_IS_CLOUD=false
 case "${ASR_ENGINE}" in
     mlx) ;;
-    runpod|vast) ASR_ENGINE_IS_CLOUD=true ;;
-    *) print_error "未知引擎：${ASR_ENGINE}（可用 mlx、runpod 或 vast；也可用 SRT_ASR_ENGINE 環境變數設定）"; exit 1 ;;
+    cloud|runpod|vast) ASR_ENGINE_IS_CLOUD=true ;;
+    *) print_error "未知引擎：${ASR_ENGINE}（可用 mlx、cloud、runpod 或 vast；也可用 SRT_ASR_ENGINE 環境變數設定）"; exit 1 ;;
 esac
 
 if [ -z "$INPUT_FILE" ]; then
@@ -254,7 +254,7 @@ if [ "$ASR_ENGINE_IS_CLOUD" = true ]; then
     for dep in curl ssh scp python3; do
         check_dependency "$dep"
     done
-    [ "$ASR_ENGINE" = "vast" ] && check_dependency "${VAST_LIB_CLI:-vastai}"
+    { [ "$ASR_ENGINE" = "vast" ] || [ "$ASR_ENGINE" = "cloud" ]; } && check_dependency "${VAST_LIB_CLI:-vastai}"
 else
     check_dependency mlx_whisper
 fi
@@ -347,7 +347,7 @@ if [ "$ASR_ENGINE_IS_CLOUD" = true ]; then
         rm -f "$MLX_MARKER"; exit 1
     fi
     # 平台由引擎名決定；不用 export 是刻意的——只影響這一次呼叫，不外洩到後面的步驟
-    CLOUD_ASR_PROVIDER="$ASR_ENGINE" "$CLOUD_ASR" "$WAV_FILE" "$DIR" "$BASENAME" "$LANGUAGE" "${ENGINE_FLAGS[@]}" 2>&1 | tee "$MLX_STDOUT_LOG"
+    CLOUD_ASR_PROVIDER="$([ "$ASR_ENGINE" = cloud ] && echo auto || echo "$ASR_ENGINE")" "$CLOUD_ASR" "$WAV_FILE" "$DIR" "$BASENAME" "$LANGUAGE" "${ENGINE_FLAGS[@]}" 2>&1 | tee "$MLX_STDOUT_LOG"
 else
     mlx_whisper "${MLX_WHISPER_ARGS[@]}" "$WAV_FILE" 2>&1 | tee "$MLX_STDOUT_LOG"
 fi

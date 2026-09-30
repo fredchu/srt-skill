@@ -33,3 +33,5 @@ def _fast_mock_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
     turn a real 3.7-minute direct-port startup into false timeouts and pod churn.
     """
     apply_fast_mock_timeouts(monkeypatch)
+    # Legacy RunPod mock tests predate auto; never let them rent a real Vast machine.
+    monkeypatch.setenv("CLOUD_ASR_PROVIDER", "runpod")

@@ -7,7 +7,7 @@
 - 拉映像停滯 → 當「直連沒生成」砍機換一台，受 MAX_POD_ATTEMPTS 限制
 - 死狀態（exited）→ 同上
 - 一切正常 → 走完 boot_wait=running、SSH ready、CUDA、砍機確認，直連位置優先於跳板
-- 預設 runpod 路徑不受影響（不設 CLOUD_ASR_PROVIDER 時看不到任何 vastai 呼叫）
+- 明確 runpod 路徑不受影響（看不到任何 vastai 呼叫）
 """
 
 from __future__ import annotations
@@ -122,8 +122,8 @@ def test_happy_path_uses_direct_endpoint_and_terminates(tmp_path: Path) -> None:
     assert any("destroy instance 9001 -y" in c for c in calls)
 
 
-def test_default_provider_never_touches_vastai(tmp_path: Path) -> None:
-    log, calls, rc = _run(tmp_path, {"FAKE_OFFERS_JSON": json.dumps(OFFERS)}, provider=None)
+def test_explicit_runpod_never_touches_vastai(tmp_path: Path) -> None:
+    log, calls, rc = _run(tmp_path, {"FAKE_OFFERS_JSON": json.dumps(OFFERS)}, provider="runpod")
     assert calls == [], calls
     assert "creating RunPod pod" in log
 

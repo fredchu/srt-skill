@@ -66,7 +66,7 @@ def test_subtitle_accepts_vast_engine_and_rejects_unknown(tmp_path: Path) -> Non
 def test_subtitle_passes_engine_name_as_provider_to_cloud_asr() -> None:
     src = SUBTITLE.read_text(encoding="utf-8")
     # 平台名必須跟著引擎名走，且只給 cloud_asr.sh 這一次呼叫（不 export）
-    assert 'CLOUD_ASR_PROVIDER="$ASR_ENGINE" "$CLOUD_ASR"' in src
+    assert 'CLOUD_ASR_PROVIDER="$([ "$ASR_ENGINE" = cloud ] && echo auto || echo "$ASR_ENGINE")" "$CLOUD_ASR"' in src
     assert "export CLOUD_ASR_PROVIDER" not in src
     # 雲端判斷不准再寫死 runpod
     assert '[ "$ASR_ENGINE" = "runpod" ]' not in src

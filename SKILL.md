@@ -106,8 +106,9 @@ ${SUBTITLE_DIR}/
 
 其他參數：
 - **ASR 模式**：預設 Breeze（`--breeze`）。用戶提到 whisper / 英文內容 / 非中文 → 用 Whisper（不加 `--breeze`）
-- **ASR 引擎**：**預設 `mlx`（本地 Apple Silicon）**。用戶提到「用 runpod」「跑雲端」「M1 Max 不在」→ `--engine=runpod`；「用 vast」「上 vast.ai」→ `--engine=vast`（Vast.ai 段見下）
+- **ASR 引擎**：**預設 `mlx`（本地 Apple Silicon）**。用戶提到「跑雲端」「上雲」「M1 Max 不在」→ `--engine=cloud`（**Vast 優先、RunPod 備援**，2026-09-30 用戶定案）；明確說「用 vast」「上 vast.ai」→ `--engine=vast`、明確說「用 runpod」→ `--engine=runpod`，**明確指定就只用那一家、不自動換**（Vast.ai 段見下）
   （也可用 `SRT_ASR_ENGINE` 環境變數）。
+  **換家規則**：`cloud` 先跑 Vast，只有 Vast 以結束碼 **75**（沒有可用機器：搜不到報價、開機失敗、SSH 就緒次數用完、CUDA 不可用，且開過的機器都已確認刪除）結束時才改跑 RunPod。辨識開始後的錯誤、或 Vast 機器刪不掉（可能還在計費）都**不換家**。Vast 單台 SSH publickey 被拒改為換下一台（帳號金鑰已確認正確，2026-09-30 維吉尼亞主機被拒、台灣主機一次通過）。
   雲端接 `--breeze` 與不帶旗標的 large-v3（1.10.1 起 subtitle.sh 會送 `--largev3`；
   之前沒送旗標才被拒，不是雲端不支援）；`--turbo` 雲端仍直接報錯。
   large-v3 雲端跑的是 faster-whisper CT2 FP16，正常語音段與本地位元組級相同（n=1 clip，見 CHANGELOG 1.10.0）。
@@ -294,7 +295,8 @@ bash "${SUBTITLE_DIR}/cloud_asr.sh" "<影片或音檔>" "${VIDEO_DIR}" "<basenam
 - 輸出**無條件轉繁體**（`s2twp`）。VV 的字形不穩定，帶不帶 prompt 都可能出簡體
 - 109 分鐘實測：1 台機器、443 段、1035 秒、**US$0.21**、RTF 0.122
 - 預算緊時用 `MAX_POD_ATTEMPTS=1`（壞機器就停，不換）
-- 便宜路線：`CLOUD_ASR_PROVIDER=vast`（5090 約 0.35–0.45 美元／小時；Vast 上一台起不來會自動換，同樣吃 `MAX_POD_ATTEMPTS`）
+- 預設不設 `CLOUD_ASR_PROVIDER` 即為 `auto`＝**Vast 優先、RunPod 備援**（規則同上方「換家規則」）。只要某一家就設 `CLOUD_ASR_PROVIDER=vast` 或 `runpod`
+- Vast 5090 約 0.35–0.55 美元／小時；上一台起不來會自動換，吃 `MAX_POD_ATTEMPTS`
 
 **短音檔（≤ 55 分鐘）— 直接跑：**
 
