@@ -37,7 +37,7 @@
 **不會換家的情況**：辨識已經開始後出錯（換家多半也一樣錯，只是多花錢）、
 或 Vast 的機器刪不掉（可能還在計費，這時候再開一台就兩邊一起燒錢）。
 
-兩家都設好最穩；只設 Vast 的話，Vast 沒機器時就會直接失敗。
+兩家都設好最穩。只設 Vast 的話，Vast 沒機器時就會直接失敗；只設 RunPod 也可以——`cloud` 發現 Vast 沒設定（沒金鑰、沒裝 `vastai`、帳號沒掛 SSH 公鑰）會直接改用 RunPod。明確指定 `vast` 時則照常報錯。
 
 ### 本地還要跑什麼
 
@@ -222,7 +222,7 @@ Silicon machine (2026-09-30) and **have not been re-tested on the 8 GB machine**
 Use `--engine=cloud`: **Vast.ai first, RunPod only when Vast has no usable
 machine** (no matching offer, instance fails to start, SSH never becomes ready,
 or CUDA unavailable — and every machine it opened was confirmed deleted).
-`--engine=vast` and `--engine=runpod` pin a single provider with no fallback.
+`--engine=vast` and `--engine=runpod` pin a single provider with no fallback. A RunPod-only setup also works: when Vast is not configured (no key, no `vastai` CLI, no SSH key on the account), `cloud` goes straight to RunPod.
 
 It never falls back once transcription has started, or when a Vast machine
 could not be deleted (it may still be billing; renting another would double

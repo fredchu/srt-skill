@@ -60,3 +60,21 @@ def test_subtitle_accepts_cloud_engine(tmp_path: Path) -> None:
     out = r.stdout + r.stderr
     assert "未知引擎" not in out
     assert "找不到檔案" in out, out[-600:]
+
+
+def test_auto_falls_back_when_vast_is_not_configured(tmp_path: Path) -> None:
+    # RunPod-only users who never set up Vast must keep working without setting a provider.
+    for extra in ({"FAKE_SSH_KEYS_JSON": "[]"}, {"VAST_LIB_CLI": str(tmp_path / "no-vastai")}):
+        case = tmp_path / str(len(extra) + len(next(iter(extra.values()))))
+        case.mkdir()
+        log, calls, rc = _run(case, extra, provider=None)
+        assert "Vast.ai not configured, falling back" in log, log[-2000:]
+        assert "trying RunPod" in log and "creating RunPod pod" in log
+        assert not any("create instance" in c for c in calls)
+
+
+def test_explicit_vast_not_configured_is_plain_error(tmp_path: Path) -> None:
+    log, calls, rc = _run(tmp_path, {"FAKE_SSH_KEYS_JSON": "[]"}, provider="vast")
+    assert rc == 1, log[-2000:]
+    assert "no SSH key on the Vast.ai account" in log
+    assert "creating RunPod pod" not in log

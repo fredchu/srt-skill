@@ -16,7 +16,8 @@ CLOUD_ASR_PROVIDER="${CLOUD_ASR_PROVIDER:-auto}"
 case "$CLOUD_ASR_PROVIDER" in
     auto)
         # Child processes isolate provider state. Only capacity exhaustion permits fallback.
-        if CLOUD_ASR_PROVIDER=vast bash "$0" "$@"; then exit 0; else status=$?; fi
+        # CLOUD_ASR_AUTO_CHILD=1 讓「Vast 沒設定」也回 75：只設了 RunPod 的人不設 provider 時照舊能跑。
+        if CLOUD_ASR_AUTO_CHILD=1 CLOUD_ASR_PROVIDER=vast bash "$0" "$@"; then exit 0; else status=$?; fi
         if [[ $status -ne 75 ]]; then exit "$status"; fi
         printf '[cloud_asr.sh] Vast.ai has no usable machine; trying RunPod\n' >&2
         exec env CLOUD_ASR_PROVIDER=runpod bash "$0" "$@"
@@ -246,6 +247,13 @@ die() {
 }
 
 no_vast_machine() { die "$1" 75; }
+
+# Vast 沒設定（金鑰、CLI、帳號 SSH 公鑰）：auto 派出的子程序回 75 讓它換 RunPod；
+# 明確指定 vast 時維持一般錯誤，設定缺了就該報錯，不要默默改用別家。
+vast_not_configured() {
+    if [[ "${CLOUD_ASR_AUTO_CHILD:-}" == 1 ]]; then die "$1; Vast.ai not configured, falling back" 75; fi
+    die "$1"
+}
 
 no_direct_endpoint() {
     if [[ "$CLOUD_ASR_PROVIDER" == vast ]]; then no_vast_machine "$1"; fi
@@ -2068,8 +2076,7 @@ load_vast_api_key() {
     if vast_lib_load_api_key; then
         return 0
     fi
-    printf '[cloud_asr.sh] ERROR: %s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "missing Vast.ai credential: set VAST_API_KEY or create $(vast_lib_api_key_file_hint)" >&2
-    exit 1
+    vast_not_configured "missing Vast.ai credential: set VAST_API_KEY or create $(vast_lib_api_key_file_hint)"
 }
 
 if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
@@ -2094,10 +2101,11 @@ fi
 
 require_cmd curl
 if [[ "$CLOUD_ASR_PROVIDER" == "vast" ]]; then
-    require_cmd "${VAST_LIB_CLI:-vastai}"
+    command -v "${VAST_LIB_CLI:-vastai}" >/dev/null 2>&1 \
+        || vast_not_configured "missing required command: ${VAST_LIB_CLI:-vastai}"
     # 帳號沒掛 SSH 公鑰的話，開了機器也連不進去，錢照燒。開機前查完，成本是零。
     vast_lib_cli show ssh-keys | jq -e 'type == "array" and length > 0' >/dev/null 2>&1 \
-        || die "no SSH key on the Vast.ai account; run: vastai create ssh-key \"\$(cat $SSH_PUBLIC_KEY_PATH)\""
+        || vast_not_configured "no SSH key on the Vast.ai account; run: vastai create ssh-key \"\$(cat $SSH_PUBLIC_KEY_PATH)\""
 elif [[ "$RUNPOD_CLOUD_TYPE" == "COMMUNITY" ]]; then
     require_cmd runpodctl
 fi
