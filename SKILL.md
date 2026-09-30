@@ -52,6 +52,7 @@ ${SUBTITLE_DIR}/
 ├── subtitle.sh                          # Step 1: ASR
 ├── vv_longaudio.py                      # Step 1': VV 長音檔自動切段+合併（含 GPU flock）
 ├── stage_timer.py                       # 分段計時：run/start/end/summary → ${VIDEO_DIR}/_timing.jsonl
+├── seg_watchdog.py                      # Step 2b/2c 平行 subagent 監看：到齊 exit 0、逾時 exit 3 列出卡住的段
 ├── srt_correct/
 │   ├── srt_correct_prompt.txt           # LLM system prompt
 │   ├── srt_preprocess.py                # Step 2a: 機械性預處理
@@ -167,16 +168,17 @@ mkdir -p "${VIDEO_DIR}"
 每個階段都要記進 `${VIDEO_DIR}/_timing.jsonl`，完成後回報印出總表。目的是之後逐段找瓶頸、改良加速（2026-09-29 回頭查耗時，只能靠檔案 mtime 拼湊，唯一有計時的 Breeze log 還被清理刪掉）。
 
 ```bash
-TIMER="python3 ${SUBTITLE_DIR}/stage_timer.py"
+# 每次都寫完整指令，不要存成 TIMER="python3 ..." 變數再 ${TIMER} 呼叫：
+# harness 的 shell 是 zsh，不做字詞切分，會把整串當指令名 → no such file（2026-09-30 演練實測）
 # 能包成單一指令的階段：把原指令整個接在 -- 後面，結束碼原樣傳回，背景跑也適用
-${TIMER} run --workdir "${VIDEO_DIR}" breeze -- ./subtitle.sh "${VIDEO_DIR}/<影片>" --breeze
+python3 "${SUBTITLE_DIR}/stage_timer.py" run --workdir "${VIDEO_DIR}" breeze -- ./subtitle.sh "${VIDEO_DIR}/<影片>" --breeze
 # 包不成單一指令的階段（Agent subagent 批次、主 session 的查證判斷）：前後各記一筆
-${TIMER} start --workdir "${VIDEO_DIR}" correct_2b
-${TIMER} end   --workdir "${VIDEO_DIR}" correct_2b          # 失敗加 --status failed
-${TIMER} summary --workdir "${VIDEO_DIR}"                    # 完成後回報用
+python3 "${SUBTITLE_DIR}/stage_timer.py" start --workdir "${VIDEO_DIR}" correct_2b
+python3 "${SUBTITLE_DIR}/stage_timer.py" end   --workdir "${VIDEO_DIR}" correct_2b   # 失敗加 --status failed
+python3 "${SUBTITLE_DIR}/stage_timer.py" summary --workdir "${VIDEO_DIR}"             # 完成後回報用
 ```
 
-- 原本是 `cd X && python3 ...` 的，寫成 `cd X && ${TIMER} run --workdir ... <stage> -- python3 ...`；`run` 是前景阻塞，不違反「背景啟動＋等待契約」
+- 原本是 `cd X && python3 ...` 的，寫成 `cd X && python3 "${SUBTITLE_DIR}/stage_timer.py" run --workdir ... <stage> -- python3 ...`；`run` 是前景阻塞，不違反「背景啟動＋等待契約」
 - 階段名固定用這組，跨影片才能比：`download`、`ocr`（重跑記 `ocr_rerun`）、`breeze`、`vv`、`hallucination_fix`、`preprocess`、`prepare_segments`、`correct_2b`（派出到全部回來）、`merge`（重派另記 `correct_2b_retry`）、`review_2c`（派出到全部回來）、`postprocess`、`noun_check_2d`、`mux`、`learn_terms`
 - 在等某階段時空轉（例如 VV 跑完還在等 OCR 重跑），不另記；總表上兩段的起訖時間自然看得出來
 
@@ -503,6 +505,19 @@ python3 "${CORRECT_DIR}/srt_preprocess.py" "<ASR 產出的 SRT>" "<輸出路徑>
 
    **重要**：所有 Agent 呼叫必須在**同一個訊息**中發出，才能真正平行執行。
 
+   **派出後同一個訊息再開背景監看**（2026-09-30 起；起因 2026-07-03 7 小時片有一段 subagent 卡死 10 分鐘沒人發現）。派出前先 `touch "${VIDEO_DIR}/.correct.launch"`，監看用工具層 `run_in_background:true`：
+
+   ```bash
+   python3 "${SUBTITLE_DIR}/seg_watchdog.py" --workdir "${VIDEO_DIR}" \
+       --pattern '_seg_{n}_corrected.srt' --segments 0-<N-1> \
+       --since "${VIDEO_DIR}/.correct.launch" --timeout 420 --interval 30
+   ```
+
+   - exit 0＝全部到齊（檔案非空、含 `-->`、比 launch marker 新），進合併
+   - exit 3＝逾時，stdout JSON 的 `missing` 就是卡住的段：先看磁碟確認真的沒寫，再對該段重派同一份 prompt，並對 `missing` 那幾段重開一次監看（重派前另 touch 一個新 marker）
+   - 狀態每輪寫 `_watchdog_status.json`，被 reap 波次砍掉時從這裡看進度；它與 Step 5 其他 `_` 開頭中間檔一起清
+   - subagent 完成通知照常收；監看只是「通知沒來也不會空等」的保底
+
    **驗證**：subagent 完成後不需逐檔人工抽查 — 第 3 步的合併腳本內建結構性品質 gate（條數比例 + 超長時長），會自動擋下過度合併。檔案不存在或無時間軸格式時 gate 也會以 ratio=0 觸發。
 
 #### Step 2b 替代路徑：本地 LLM（--local 模式）
@@ -678,6 +693,8 @@ done
    完成後回報修改了多少條。回報中提及任何具體條目（疑點、保留未改項）時必須附該條時間軸（HH:MM:SS），不得只給條目編號。
    ```
 
+   複查同樣派出後開監看：`--pattern '_review_seg_{n}_fixes.txt'`（寫 `NO_FIXES` 也算到齊），marker 用另一個 `.review.launch`。
+
 #### Step 2c 替代路徑：本地 LLM（--local 模式）
 
 ```bash
@@ -824,7 +841,8 @@ find "${VIDEO_DIR}" -maxdepth 1 \( \
     -o -name "_review_seg_*" -o -name "_system_prompt.txt" -o -name "_review_prompt.txt" \
     -o -name "*_vvpart*" \
     -o -name "*_vv_part*" -o -name "*_part*_vibevoice.json" \
-    -o -name "*_part[0-9].wav" -o -name "*_benchmark.txt" \) -delete
+    -o -name "*_part[0-9].wav" -o -name "*_benchmark.txt" \
+    -o -name "_watchdog_status.json" -o -name ".correct.launch" -o -name ".review.launch" \) -delete
 # subtitle.sh 產生的全長 wav（如有）
 rm -f "${VIDEO_DIR}/<影片檔名同名>.wav"
 ```
