@@ -1362,6 +1362,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -1490,6 +1491,21 @@ def write_json(path: Path, value: object) -> None:
     tmp.replace(path)
 
 
+SALVAGED_PARTS: list[dict[str, object]] = []
+
+
+def salvage_segments(text: str) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for match in re.finditer(r"\{[^{}]*\}", text):
+        try:
+            item = json.loads(match.group(0))
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            items.append(item)
+    return items
+
+
 def transcribe_part(processor, model, audio: Path, prompt: str) -> tuple[list[dict[str, object]], float]:
     request = {"audio": str(audio)}
     if prompt:
@@ -1499,7 +1515,18 @@ def transcribe_part(processor, model, audio: Path, prompt: str) -> tuple[list[di
     output_ids = model.generate(**inputs, max_new_tokens=32768, do_sample=False)
     inference_s = time.monotonic() - started
     generated = output_ids[:, inputs["input_ids"].shape[1]:]
-    parsed = processor.decode(generated, return_format="parsed")
+    try:
+        parsed = processor.decode(generated, return_format="parsed")
+    except ValueError as exc:
+        # 2026-10-07 Allen 4Q 5:53 長片：第 2 段（44 分）模型吐出的 JSON 中間壞一處，
+        # extract_speaker_dict 直接 raise，整支 6 小時連同已完成的第 1 段全部作廢。
+        # 改成逐筆撿回格式完好的物件；壞掉的那幾筆丟掉並記數，不讓單段拖垮全片。
+        raw = processor.decode(generated, skip_special_tokens=True)
+        if isinstance(raw, list):
+            raw = raw[0] if raw else ""
+        parsed = salvage_segments(str(raw))
+        SALVAGED_PARTS.append({"audio": audio.name, "error": str(exc), "salvaged": len(parsed)})
+        print(f"WARNING: {audio.name} JSON 解析失敗（{exc}），逐筆撿回 {len(parsed)} 筆", file=sys.stderr)
     if isinstance(parsed, list) and parsed and isinstance(parsed[0], list):
         parsed = parsed[0]
     segments: list[dict[str, object]] = []
@@ -1597,6 +1624,7 @@ write_json(EVIDENCE_DIR / "vv_run.json", {
     "parts": len(ranges),
     "segments": len(merged_segments),
     "chunk_timings": chunk_timings,
+    "salvaged_parts": SALVAGED_PARTS,
     "total_elapsed_s": time.monotonic() - started_at,
     "prompt_terms": len([term for term in PROMPT.split(', ') if term]) if PROMPT else 0,
 })
