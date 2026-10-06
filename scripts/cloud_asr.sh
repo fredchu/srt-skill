@@ -1547,7 +1547,16 @@ EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
 
 started_at = time.monotonic()
 snapshot_started = time.monotonic()
-snapshot = snapshot_download(MODEL_ID)
+# 2026-10-07 Vast 主機抓模型 httpx.ReadTimeout 整支失敗；snapshot_download 會續傳，重試即可。
+for download_attempt in range(1, 4):
+    try:
+        snapshot = snapshot_download(MODEL_ID)
+        break
+    except Exception as exc:
+        if download_attempt == 3:
+            raise
+        print(f"WARNING: 模型下載第 {download_attempt} 次失敗（{type(exc).__name__}），30 秒後重試", file=sys.stderr)
+        time.sleep(30)
 snapshot_download_s = time.monotonic() - snapshot_started
 processor_started = time.monotonic()
 processor = AutoProcessor.from_pretrained(snapshot, local_files_only=True)
