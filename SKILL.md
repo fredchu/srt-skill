@@ -85,7 +85,7 @@ ${SUBTITLE_DIR}/
 
 必需/選用語義：
 - Breeze ASR 是必需階段。產物無效，或進程消失且沒有有效 SRT，必須 hard-fail。
-- VibeVoice 是選用參考。進程消失但沒有有效 VV SRT/JSON 時，擷取 log/exit code 記 warning，跳過 VV 交叉參考繼續；絕不無限等。
+- VibeVoice 是必需的交叉參考（2026-10-07 用戶定案：「VV 很重要，不太能不跑」）。進程消失但沒有有效 VV SRT/JSON 時，擷取 log/exit code 查原因、修好重跑；雲端失敗就同時開本地 `vv_longaudio.py` 保底（兩邊輸出檔名要分開，例如本地用 `_vibevoice_local.*`）。**至少一份 VV 通過檢查前不開始 Step 2b**。絕不無限等：沒進度就主動查進程/log 處理，而不是跳過。
 - OCR/caption 依 slide-ref 是否為本次必要輸入比照處理；選用 caption 失敗時記 warning 並略過 caption ref。
 
 並行邊界按引擎判斷：**Breeze 與本地 VibeVoice 不可並行**——兩者搶同一個 `<影片檔名>.wav`，見上方互斥表；本地 Breeze 與雲端 VV（`cloud_asr.sh --vv`）可並行（記憶體層面確實不會 OOM，但那不涵蓋搶檔 race）；RapidOCR（純 CPU）可與 ASR 並行；VLM caption（`--engine ollama/mlx` 或顯式 VLM model）必須序列在 GPU ASR 之後，不能籠統宣稱 Step 0.5 可與 ASR 並行。
@@ -335,7 +335,7 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/vv_longaudio.py" \
 - `<檔名>_vibevoice.json` — VV 的 segments JSON（Step 2b 用），欄位可能是 `Start`/`End`/`Content` 或小寫 `start`/`end`/`text`（兩種都要支援，下游腳本已處理）
 
 注意：
-- 如果 VV 執行失敗（模型未安裝等），pipeline 繼續跑，Step 2b 跳過 VV 參考
+- 如果 VV 執行失敗，查原因修好重跑（雲端失敗改本地或兩邊同時跑），不要跳過 VV 參考直接校正
 - 用 `--breeze` 時才啟用 Step 1'（Whisper 模式不用 VV，因為 VV 底層也是 Whisper 架構）
 - `mlx_audio` 套件硬限制 59 分鐘（`MAX_DURATION_SECONDS = 59 * 60`），超過會靜默 trim — 必須在 pipeline 端切段，不能依賴 VV 自己處理
 - `vibevoice_asr.py` 的 `max_tokens` 已改為 32768（原 8192 對 > 30 分鐘音檔不夠，會導致 0 segments）
