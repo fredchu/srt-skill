@@ -265,7 +265,9 @@ fi
 
 print_success "所有依賴已就緒（引擎：${ASR_ENGINE}）"
 
-if [ "$USE_TURBO" = true ]; then
+if [ "$USE_BREEZE" = true ]; then
+    echo "    模型：Breeze ASR 25（${MODEL}）"
+elif [ "$USE_TURBO" = true ]; then
     print_warning "使用 turbo 模型（較快但中文品質略差）"
 else
     echo "    模型：large-v3 完整版"
