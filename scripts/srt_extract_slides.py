@@ -709,9 +709,25 @@ def find_curated_terms(slide_path: str, curated_dir: str | None) -> str | None:
     return matches[0] if matches else None
 
 
+def find_curated_by_title(title: str, curated_dir: str | None) -> str | None:
+    """Fallback when no slide file is given: series name after <sha12>_ must prefix the video title.
+
+    The prefix must end at a '-' boundary so 技術分析-1月 never matches 技術分析-10月-01.
+    """
+    if not curated_dir:
+        return None
+    best, best_len = None, -1
+    for path in sorted(glob.glob(os.path.join(glob.escape(curated_dir), "*_*.txt"))):
+        series = os.path.basename(path)[:-4].split("_", 1)[1]
+        if (title == series or title.startswith(series + "-")) and len(series) > best_len:
+            best, best_len = path, len(series)
+    return best
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract slide terminology from video")
-    parser.add_argument("video", help="Path to video file, .pptx/.ppt slide file, or PDF slide deck")
+    parser.add_argument("video", nargs="?", help="Path to video file, .pptx/.ppt slide file, or PDF slide deck")
+    parser.add_argument("--lookup-title", help="沒給投影片時：用影片標題找精簡版術語，命中印路徑 exit 0，沒有 exit 1")
     parser.add_argument("--output", "-o", help="Output terms file path (default: <video_dir>/_slide_terms.txt)")
     parser.add_argument("--interval", type=int, default=60, help="Frame extraction interval in seconds (default: 60)")
     parser.add_argument("--threshold", type=int, default=8, help="Perceptual hash dedup threshold (default: 8)")
@@ -726,6 +742,15 @@ def main():
                         help="精簡版術語資料夾：檔名以投影片 sha256 前 12 碼開頭（<sha12>_<名稱>.txt），"
                              "命中就直接用、不重抽（預設讀 SRT_SLIDE_CURATED_DIR）")
     args = parser.parse_args()
+
+    if args.lookup_title:
+        found = find_curated_by_title(args.lookup_title, args.curated_dir)
+        if not found:
+            sys.exit(1)
+        print(found)
+        return
+    if not args.video:
+        parser.error("video is required unless --lookup-title is given")
 
     video_path = os.path.abspath(args.video)
     if not os.path.exists(video_path):

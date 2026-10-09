@@ -69,3 +69,33 @@ def test_main_extracts_when_no_curated_match(tmp_path, monkeypatch):
     slides.main()
 
     assert "新詞" in out.read_text(encoding="utf-8")
+
+
+def test_find_curated_by_title_matches_series_prefix_only(tmp_path):
+    (tmp_path / "e294916dae7e_技術分析-9月.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "aaaaaaaaaaaa_技術分析-1月.txt").write_text("x", encoding="utf-8")
+
+    assert slides.find_curated_by_title("技術分析-9月-02", str(tmp_path)).endswith("_技術分析-9月.txt")
+    assert slides.find_curated_by_title("技術分析-9月", str(tmp_path)).endswith("_技術分析-9月.txt")
+    assert slides.find_curated_by_title("技術分析-10月-01", str(tmp_path)) is None
+    assert slides.find_curated_by_title("投資組合-9月-01", str(tmp_path)) is None
+
+
+def test_main_lookup_title_prints_path_or_exits_1(tmp_path, monkeypatch, capsys):
+    import sys
+
+    (tmp_path / "e294916dae7e_技術分析-9月.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["x", "--lookup-title", "技術分析-9月-02", "--curated-dir", str(tmp_path)])
+    slides.main()
+    assert capsys.readouterr().out.strip().endswith("_技術分析-9月.txt")
+
+    monkeypatch.setattr(sys, "argv", ["x", "--lookup-title", "行情看法分享", "--curated-dir", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        slides.main()
+    assert exc.value.code == 1
+
+
+def test_find_curated_by_title_prefers_longest_series(tmp_path):
+    (tmp_path / "bbbbbbbbbbbb_技術分析.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "e294916dae7e_技術分析-9月.txt").write_text("x", encoding="utf-8")
+    assert slides.find_curated_by_title("技術分析-9月-02", str(tmp_path)).endswith("_技術分析-9月.txt")
