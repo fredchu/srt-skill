@@ -19,7 +19,7 @@ description: >
 ```
 YouTube 連結 或 本地影片/音檔
   ↓ Step 0 (if YouTube): yt-dlp 下載影片
-  ↓ Step 0.5 (if 投影片文字): 抽取本集術語補充表
+  ↓ Step 0.5: 畫面截圖 OCR（影片必跑）＋投影片檔術語（有給才抽）
 本地影片檔
   ↓ Step 1:  subtitle.sh (Breeze ASR)          ← 先跑完這個
   ↓ Step 1': vibevoice_asr.py (VV ASR)         ← 再跑；本地 VV 不可與 Step 1 並行（搶同一個 wav）
@@ -221,7 +221,9 @@ cp "<原始路徑>" "${VIDEO_DIR}/"
 
 **執行時機**：RapidOCR / Apple Vision 是 CPU 或平台 OCR，可與 Step 1（ASR）和 Step 1'（VV）並行。`--engine ollama` / `--engine mlx` 或顯式 VLM model 會吃 GPU，必須等 Step 1 和 Step 1' 完成後、Step 2a 之前或之後再跑。
 
-**如果用戶提供了投影片檔**，跳過自動擷取，直接用該檔作為全局術語表（舊行為）：
+**輸入是影片時，畫面自動擷取一律要跑，有沒有給投影片檔都一樣**（2026-10-09 用戶定案）。投影片檔只給全局術語、對不到時間點；畫面擷取才有逐段的 `_slide_captions.json`，講者臨時切去看盤的個股代號也只在畫面上。兩者並用。音檔輸入才沒有畫面可擷取。
+
+**如果用戶提供了投影片檔**，另外把它抽成全局術語表：
 - `.txt`（純文字）→ 直接當術語表用
 - `.pptx` / `.ppt`（PowerPoint）→ 用 `srt_extract_slides.py` 抽**兩層**：OOXML 文字（遞迴 group/table/text_frame + 備註，去重）＋內嵌圖片的 RapidOCR 文字。跳過 ffmpeg/幀去重/VLM：
   ```bash
@@ -232,9 +234,9 @@ cp "<原始路徑>" "${VIDEO_DIR}/"
   ```bash
   python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pdf>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt"
   ```
-  PDF 沒有時間戳：講者是在影片裡播投影片時，另外跑一次影片的自動擷取拿 `_slide_captions.json`（逐段畫面參考），兩者並用。
+  PDF 和 pptx 都沒有時間戳，所以影片照樣要跑下面的自動擷取拿 `_slide_captions.json`（逐段畫面參考），兩者並用。
 
-**自動擷取**（無投影片文字檔時）：
+**自動擷取**（輸入是影片就跑；有投影片檔時 `--output` 要換名字，例如 `<檔名>_video_slide_terms.txt`，別蓋掉投影片抽出的 `_slide_terms.txt`）：
 
 ```bash
 cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/srt_extract_slides.py" \
@@ -267,7 +269,7 @@ cd "${VIDEO_DIR}" && python3 "${SUBTITLE_DIR}/srt_extract_slides.py" \
 > Migration（2026-06-28）：`auto` 從「VLM caption 預設」改為「RapidOCR 預設」。實證 OCR 字面文字對字幕校正品質不輸甚至更好且更省資源（見 wiki `SRT Slide OCR Extraction`）。要舊 VLM 行為請顯式 `--engine ollama` 或給 `--model`。
 
 在 Step 2b 組裝 prompt 時：
-- `_slide_terms.txt` 加在術語表後面（全局，與舊行為相同）
+- `_slide_terms.txt` 加在術語表後面（全局，與舊行為相同）。**投影片術語只能追加，不能取代講者術語表**（2026-10-09 用戶定案）：講者術語表是跨集累積的誤聽對照，投影片只有本集用詞，兩者缺一不可。第一輪校正（Step 2b）和複查（Step 2c）都要同時帶兩份
 - `_slide_captions.json` 按時間戳分配給對應的 segment，寫入 `_caption_ref_<N>.txt`
 
 ### Step 1': VibeVoice 輔助 ASR（**序列跑在 Step 1 之後**）
@@ -595,6 +597,7 @@ done
    TERMS = '${TERMS}'
    PREPROCESSED = '<preprocessed SRT 路徑>'
    CORRECTED_RAW = '<_2b_corrected.srt 路徑>'
+   SLIDE_TERMS = '<與 Step 2b --slide-terms 同一個檔，沒有就留空字串>'
 
    # 解析 SRT 為 {timecode: text} 字典
    def parse_srt(path):
@@ -630,7 +633,10 @@ done
                break
 
    # 組裝複查 prompt
+   # 講者術語表在前、本集投影片術語追加在後（與 Step 2b 同一組裝方式）
    terms = open(TERMS).read()
+   if SLIDE_TERMS and os.path.exists(SLIDE_TERMS):
+       terms += '\n\n## 本集投影片術語\n' + open(SLIDE_TERMS).read()
    review_prompt = f'''你是字幕複查員。以下字幕已經過一輪 ASR 校正但未被修改。
 請逐條檢查是否有殘留的 ASR 錯誤。
 
