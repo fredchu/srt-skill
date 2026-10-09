@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.17.0 - 2026-10-09
+
+### 新增
+
+- **提示拆檔＋讀取驗證碼，防 Read 靜默截斷。** Read 工具單次約 25K token，超過就靜默截斷。技術分析-9月-01
+  的校正提示（規則＋Austin 術語表＋投影片術語）約 32K，Step 2b 四段 subagent 全只讀到第 1190/1588 行，
+  排在術語表後面的禁止事項、輸出格式、VV 與畫面規則全丟，合併 gate 照樣全過。新增 `srt_prompt_files.py`：
+  規則留在 `_system_prompt.txt`，術語切成每份 ≤12K token 的 `_terms_K.txt`，每檔末行放隨機驗證碼；
+  subagent 抄進 `_seg_<N>_receipt.txt`，`srt_merge_segments.py` 缺碼就 gate fail（reason `receipt`）。
+  真資料實跑：Sonnet 截斷標記 0 次、回條比對通過；刪一個驗證碼即被擋下。
+- `srt_prepare_review.py`：Step 2c 原本寫在 SKILL.md 的 inline python 搬成腳本（提示文字未改），同樣拆檔＋驗證碼；
+  套用複查修正前先跑 `srt_prompt_files.py check`。
+- **精簡版投影片術語沿用**：`srt_extract_slides.py --curated-dir`（或 `SRT_SLIDE_CURATED_DIR`）。
+  資料夾裡的 `<投影片 sha256 前 12 碼>_<系列名>.txt` 按內容指紋命中就直接用、不重抽；
+  沒給投影片時 `--lookup-title "<影片標題>"` 以系列名找（系列名須是標題開頭且下一字是 `-`）。
+- `srt_translate_ko.py assemble` 同時產出 `<名稱>_中韓對照.txt`（每條：時間／中文／韓文）。
+
+### 變更
+
+- 輸入是影片時，畫面自動擷取一律要跑，有沒有給投影片都一樣（投影片沒有時間點）。
+- 投影片術語只能追加、不能取代講者術語表；Step 2c 複查也帶投影片術語（第一版起只有 2b 帶）。
+- 完成回報新增「投影片術語來源」一項；沒有任何來源時提醒用戶補給。
+- VibeVoice 改為必需：失敗要修好重跑，雲端失敗就開本地保底，至少一份通過才進 Step 2b。
+
+### 修正
+
+- pptx 文字層與圖片 OCR 層也濾掉頁碼與純數字行（PDF 早就有）。技術分析 9 月投影片 618 → 375 行，濾掉的全是圖表刻度。
+- `cloud_asr`：VV 單段 JSON 解析失敗改為逐筆撿回，不讓整支長片作廢；VV 模型下載逾時重試 3 次。
+- `subtitle.sh`：Breeze 模式印正確的模型名稱（原本固定印 large-v3）。
+
+### 文件
+
+- 回聽清單要給定位過的 `_uncertain_review.md`，不直接給 subagent 的原始 sidecar。
+- 手修韓文字幕要連 `ko/batch_*.json` 一起改，否則重跑 `assemble` 會蓋回去。
+
 ## 1.16.0 - 2026-09-30
 
 ### 新增
