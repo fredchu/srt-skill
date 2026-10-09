@@ -15,6 +15,8 @@ Output:
 from __future__ import annotations
 
 import argparse
+import glob
+import hashlib
 import importlib
 import json
 import os
@@ -697,6 +699,16 @@ def extract_pdf_text(pdf_path: str) -> tuple[list[str], list[str], int]:
     return lines, ocr_lines, len(frames)
 
 
+def find_curated_terms(slide_path: str, curated_dir: str | None) -> str | None:
+    """Return a hand-curated terms file whose name starts with the slide file's sha256[:12]."""
+    if not curated_dir:
+        return None
+    with open(slide_path, "rb") as f:
+        sha12 = hashlib.sha256(f.read()).hexdigest()[:12]
+    matches = sorted(glob.glob(os.path.join(glob.escape(curated_dir), f"{sha12}_*.txt")))
+    return matches[0] if matches else None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract slide terminology from video")
     parser.add_argument("video", help="Path to video file, .pptx/.ppt slide file, or PDF slide deck")
@@ -710,6 +722,9 @@ def main():
     parser.add_argument("--json", action="store_true", help="Also output raw JSON results")
     parser.add_argument("--caption", action="store_true",
                         help="Caption mode: output timestamped captions + terms as _slide_captions.json")
+    parser.add_argument("--curated-dir", default=os.environ.get("SRT_SLIDE_CURATED_DIR"),
+                        help="精簡版術語資料夾：檔名以投影片 sha256 前 12 碼開頭（<sha12>_<名稱>.txt），"
+                             "命中就直接用、不重抽（預設讀 SRT_SLIDE_CURATED_DIR）")
     args = parser.parse_args()
 
     video_path = os.path.abspath(args.video)
@@ -724,6 +739,14 @@ def main():
     print(f"Output: {output_path}", file=sys.stderr)
 
     ext = os.path.splitext(video_path)[1].lower()
+    if ext in (".pptx", ".ppt", ".pdf"):
+        curated = find_curated_terms(video_path, args.curated_dir)
+        if curated:
+            shutil.copyfile(curated, output_path)
+            print(f"\n=== 使用精簡版術語（同一份投影片之前整理過）===\n  Curated: {curated}\n"
+                  f"  Output: {output_path}", file=sys.stderr)
+            return
+
     if ext in (".pptx", ".ppt"):
         if args.caption:
             print("pptx 無時間戳，忽略 --caption，只輸出 _slide_terms.txt", file=sys.stderr)

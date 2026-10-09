@@ -226,15 +226,22 @@ cp "<原始路徑>" "${VIDEO_DIR}/"
 **輸入是影片時，畫面自動擷取一律要跑，有沒有給投影片檔都一樣**（2026-10-09 用戶定案）。投影片檔只給全局術語、對不到時間點；畫面擷取才有逐段的 `_slide_captions.json`，講者臨時切去看盤的個股代號也只在畫面上。兩者並用。音檔輸入才沒有畫面可擷取。
 
 **如果用戶提供了投影片檔**，另外把它抽成全局術語表：
+
+> **精簡版術語自動沿用（2026-10-09 起）**：一份投影片常跨好幾集（技術分析 9 月＝9月-01、02…）。第一集做完後若人工整理過精簡版，
+> 存成 `${DATA_DIR}/srt_correct/slide_terms_curated/<投影片 sha256 前 12 碼>_<名稱>.txt`（`shasum -a 256 <投影片> | cut -c1-12`）。
+> 之後再給同一份投影片，`--curated-dir` 會按內容指紋命中、直接輸出精簡版、不重抽（stderr 印「使用精簡版術語」）。
+> 檔名改了、搬了位置照樣認得；投影片內容一改指紋就變，不會誤用舊的。完成回報時要講這次用的是精簡版還是現抽。
 - `.txt`（純文字）→ 直接當術語表用
 - `.pptx` / `.ppt`（PowerPoint）→ 用 `srt_extract_slides.py` 抽**兩層**：OOXML 文字（遞迴 group/table/text_frame + 備註，去重）＋內嵌圖片的 RapidOCR 文字。跳過 ffmpeg/幀去重/VLM：
   ```bash
-  python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pptx>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt"
+  python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pptx>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt" \
+      --curated-dir "${DATA_DIR}/srt_correct/slide_terms_curated"
   ```
   輸出含 `# 螢幕 OCR 文字（原始）` 區塊（僅在有圖且 OCR 成功時）。**圖片層不可省**：K 線／看盤截圖裡的 ticker 與指標名在 XML 完全不存在（2026-07-15 實測 `67月.pptx`：8 圖補回 152 行，PLTR／MA300DIST／CME_MINI／NASDAQ／NQ／EURUSD 只在像素層）。頁碼與純數字行（圖表的價格／日期刻度，如 `162.50`、`2024`）兩層都自動濾掉，與 PDF 同一個過濾器（2026-10-09 起；9 月投影片 618→375 行，濾掉的 243 行全是刻度與頁碼）。RapidOCR 未安裝或 OCR 失敗只印 warning、照常輸出 XML 文字（OCR 是加分不是必需）。成本約 1 秒/圖。
 - `.pdf`（Google 簡報匯出、財經M平方等講義）→ 同一支腳本，同樣兩層：`pdftotext` 文字層＋`pdftoppm` 每頁渲染後的 RapidOCR 文字（圖表標題、指標名只在像素層）。頁碼與純數字行（如 `55.4`）自動濾掉。需要 Poppler（`brew install poppler`）；缺 `pdftoppm` 或 OCR 失敗只印 warning、照常輸出文字層。2026-09-23 實測群益 59 頁：文字層 124 行＋OCR 1143 行，約 1.5 秒/頁：
   ```bash
-  python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pdf>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt"
+  python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pdf>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt" \
+      --curated-dir "${DATA_DIR}/srt_correct/slide_terms_curated"
   ```
   PDF 和 pptx 都沒有時間戳，所以影片照樣要跑下面的自動擷取拿 `_slide_captions.json`（逐段畫面參考），兩者並用。
 
