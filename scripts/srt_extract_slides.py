@@ -581,7 +581,7 @@ def extract_pptx_text(pptx_path: str) -> tuple[list[str], list[str], int]:
     unique_lines = []
     seen = set()
     for line in lines:
-        if line not in seen:
+        if _has_word(line) and line not in seen:
             seen.add(line)
             unique_lines.append(line)
 
@@ -612,7 +612,7 @@ def extract_pptx_text(pptx_path: str) -> tuple[list[str], list[str], int]:
             for result in results:
                 for line in result.get("raw", "").splitlines():
                     line = line.strip()
-                    if line and line not in seen:
+                    if line and _has_word(line) and line not in seen:
                         seen.add(line)
                         ocr_lines.append(line)
 

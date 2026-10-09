@@ -229,7 +229,7 @@ cp "<原始路徑>" "${VIDEO_DIR}/"
   ```bash
   python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pptx>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt"
   ```
-  輸出含 `# 螢幕 OCR 文字（原始）` 區塊（僅在有圖且 OCR 成功時）。**圖片層不可省**：K 線／看盤截圖裡的 ticker 與指標名在 XML 完全不存在（2026-07-15 實測 `67月.pptx`：8 圖補回 152 行，PLTR／MA300DIST／CME_MINI／NASDAQ／NQ／EURUSD 只在像素層）。RapidOCR 未安裝或 OCR 失敗只印 warning、照常輸出 XML 文字（OCR 是加分不是必需）。成本約 1 秒/圖。
+  輸出含 `# 螢幕 OCR 文字（原始）` 區塊（僅在有圖且 OCR 成功時）。**圖片層不可省**：K 線／看盤截圖裡的 ticker 與指標名在 XML 完全不存在（2026-07-15 實測 `67月.pptx`：8 圖補回 152 行，PLTR／MA300DIST／CME_MINI／NASDAQ／NQ／EURUSD 只在像素層）。頁碼與純數字行（圖表的價格／日期刻度，如 `162.50`、`2024`）兩層都自動濾掉，與 PDF 同一個過濾器（2026-10-09 起；9 月投影片 618→375 行，濾掉的 243 行全是刻度與頁碼）。RapidOCR 未安裝或 OCR 失敗只印 warning、照常輸出 XML 文字（OCR 是加分不是必需）。成本約 1 秒/圖。
 - `.pdf`（Google 簡報匯出、財經M平方等講義）→ 同一支腳本，同樣兩層：`pdftotext` 文字層＋`pdftoppm` 每頁渲染後的 RapidOCR 文字（圖表標題、指標名只在像素層）。頁碼與純數字行（如 `55.4`）自動濾掉。需要 Poppler（`brew install poppler`）；缺 `pdftoppm` 或 OCR 失敗只印 warning、照常輸出文字層。2026-09-23 實測群益 59 頁：文字層 124 行＋OCR 1143 行，約 1.5 秒/頁：
   ```bash
   python3 "${SUBTITLE_DIR}/srt_extract_slides.py" "<投影片.pdf>" -o "${VIDEO_DIR}/<檔名>_slide_terms.txt"
