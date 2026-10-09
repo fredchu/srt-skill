@@ -37,6 +37,7 @@ def args_for(tmp_path, preprocessed, seg_size=None):
         seg_size=seg_size,
         max_tokens=8000,
         max_entries=200,
+        prompt_max_tokens=12000,
     )
 
 
@@ -180,6 +181,7 @@ def test_prepare_real_artifact_dynamic(tmp_path):
         seg_size=None,
         max_tokens=8000,
         max_entries=200,
+        prompt_max_tokens=12000,
     )
 
     summary = prep.prepare(args)

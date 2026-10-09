@@ -58,7 +58,9 @@ ${SUBTITLE_DIR}/
 │   ├── srt_correct_prompt.txt           # LLM system prompt
 │   ├── srt_preprocess.py                # Step 2a: 機械性預處理
 │   ├── srt_prepare_segments.py          # Step 2b: 切分 + system prompt 組裝 + VV/caption ref
-│   ├── srt_merge_segments.py            # Step 2b: 合併 + 結構性品質 gate + metrics
+│   ├── srt_prompt_files.py              # Step 2b/2c: 規則與術語拆檔＋讀取驗證碼＋回條檢查（防 Read 截斷）
+│   ├── srt_merge_segments.py            # Step 2b: 合併 + 結構性品質 gate（含回條）+ metrics
+│   ├── srt_prepare_review.py            # Step 2c: 抽未變動條目＋組複查 prompt（同樣拆檔＋驗證碼）
 │   ├── srt_postprocess.py               # Step 2c: 後處理（強制拆句等，--terms 指向 DATA_DIR）
 │   ├── srt_strip_commentary.py          # Step 2c: 清掉複查 subagent 殘留的判斷文字
 │   ├── srt_learn_terms.py               # Step 3: 術語學習（diff 統計 + 已收錄判斷）
@@ -460,7 +462,16 @@ python3 "${CORRECT_DIR}/srt_preprocess.py" "<ASR 產出的 SRT>" "<輸出路徑>
    > 教訓與實證來源：2026-06-26-27 投資組合-5月-03（codex 實證 review + 多輪對抗改善循環 + 跨 6 影片失敗率曲線實測收斂）。
 
    這個腳本產出：
-   - `_system_prompt.txt`：組裝好的完整 system prompt（含 VV 交叉參考規則 + 畫面描述規則，如有）
+   - `_system_prompt.txt`：**只放規則**（含 VV 交叉參考規則 + 畫面描述規則，如有），開頭是「讀取須知」，列出全部要讀的檔
+   - `_terms_1.txt` ~ `_terms_K.txt`：講者術語表＋本集投影片術語，切成每份 ≤ `--prompt-max-tokens`（預設 12000）
+   - `_read_codes.json`：每個提示檔最後一行的讀取驗證碼；合併關卡拿它比對回條
+   - summary 多兩欄 `prompt_files`／`prompt_tokens`，派工前看一眼有沒有單檔超過上限（腳本超過 1.5 倍會印 WARNING）
+
+   > **為什麼拆檔（2026-10-09 技術分析-9月-01 實錘）**：Read 工具單次約回 25K token（cl100k 估），超過**靜默截斷**。
+   > 當時規則＋Austin 術語表＋投影片術語約 32K，4 段校正 subagent 全部只讀到第 1190/1588 行，
+   > 排在術語表後面的禁止事項、輸出格式、VV 與畫面規則全丟，成品照樣過合併 gate——只因一個 subagent 自己講出來才發現。
+   > 光是規則＋術語表就約 22K，術語表再長一點連沒投影片的影片都會被截。所以：規則留主檔、術語拆檔、
+   > 每檔末尾放驗證碼、subagent 抄回條、合併前比對，缺碼＝沒讀完＝gate fail 重派。
    - `_seg_0.srt` ~ `_seg_N.srt`：每段 SRT
    - `_ctx_1.txt` ~ `_ctx_N.txt`：每段的上文參考（第一段沒有）
    - `_vv_ref_0.txt` ~ `_vv_ref_N.txt`：每段的 VV 參考文字（如有 VV JSON）
@@ -479,7 +490,9 @@ python3 "${CORRECT_DIR}/srt_preprocess.py" "<ASR 產出的 SRT>" "<輸出路徑>
    ```
    你是字幕校正 subagent。請完成以下步驟：
 
-   1. 用 Read 工具讀取 system prompt：<工作目錄>/_system_prompt.txt
+   1. 用 Read 工具讀取 system prompt：<工作目錄>/_system_prompt.txt，再照它開頭「讀取須知」列出的每個檔逐一讀完
+      （_terms_1.txt …）。任何一次讀取顯示被截斷，就用 offset/limit 分段讀到看見該檔最後一行的驗證碼。
+      全部讀完後，把每個檔的驗證碼依序一行一個，用 Write 寫進 <工作目錄>/_seg_<N>_receipt.txt
    2. 用 Read 工具讀取待校正字幕：<工作目錄>/_seg_<N>.srt
    3. [如果 N > 0] 用 Read 工具讀取上文參考：<工作目錄>/_ctx_<N>.txt
    4. [如果檔案存在] 用 Read 工具讀取 VibeVoice 參考：<工作目錄>/_vv_ref_<N>.txt
@@ -532,6 +545,8 @@ python3 "${CORRECT_DIR}/srt_preprocess.py" "<ASR 產出的 SRT>" "<輸出路徑>
 
 ```bash
 OLLAMA_LLM="${CORRECT_DIR}/ollama_llm.py"
+# 本地模型沒有 Read 截斷問題，把規則與術語檔接回一份（檔名照 _read_codes.json 的順序）
+python3 -c "import json,sys; d='${WORK_DIR}'; print(''.join(open(f'{d}/{n}',encoding='utf-8').read() for n in json.load(open(f'{d}/_read_codes.json'))['files']))" > "${WORK_DIR}/_system_prompt_local.txt"
 
 for seg_file in "${WORK_DIR}"/_seg_*.srt; do
     N=$(echo "$seg_file" | grep -oP '_seg_\K\d+')
@@ -548,7 +563,7 @@ for seg_file in "${WORK_DIR}"/_seg_*.srt; do
     echo -e "$USER_INPUT" > "${WORK_DIR}/_user_${N}.txt"
 
     python3 "$OLLAMA_LLM" \
-        --system "${WORK_DIR}/_system_prompt.txt" \
+        --system "${WORK_DIR}/_system_prompt_local.txt" \
         --user "${WORK_DIR}/_user_${N}.txt" \
         --output "${WORK_DIR}/_seg_${N}_corrected.srt" \
         --max-tokens 16384
@@ -576,116 +591,30 @@ done
      - `ratio < 0.55` → FAIL（過度合併，如 300→110 事故）
      - `ratio < 0.80` 且該段有條目時長 > 15 秒 → FAIL（合併症狀）
      - `0.55 ≤ ratio < 0.80` 且無時長症狀 → 合併照常，記入 `warn_segments`（破碎句密集區的合法合併）
+     - 工作目錄有 `_read_codes.json` 時，`_seg_<N>_receipt.txt` 缺任何驗證碼 → FAIL（reason `receipt`，`receipt_missing`＝缺幾個）。本地模式不寫回條，跑合併前先 `rm -f _read_codes.json`
    - gate 全過 → 嚴格 block 驗證、雙行重複修復、時間排序、end-time clamp、coverage check（>15s gap 用 preprocessed 補洞）、重新編號
    - 成功：stdout 印 JSON metrics（entries / patched / per_segment ratio / max_dur_sec / over_12s_count），exit 0
    - gate FAIL：不寫輸出，stdout 印 `{"gate": "fail", "failed_segments": [...]}`，**exit 2**
 
-   **exit 2 時的處理**：對每個 failed segment 按 `reasons` 組裝提示後重派校正 subagent（同一段、同樣的 prompt）。含 `ratio` 時，在 prompt「重要」清單最前面追加：「**上一輪輸出只有 <output> 條（原始 <input> 條），嚴重過度合併。這次必須逐條校正，輸出條數 ≥ <input×0.9> 條**」；含 `zero_duration` 時追加：「**上一輪輸出含捏造/零時長時間軸（例：<zero_dur_examples>），這次必須沿用原始每條時間軸，禁止細分或位移**」；含 `dup_text` 時追加：「**上一輪把其他位置的內容複製進本段造成重複（例：<dup_examples>），這次嚴禁輸出原始 <input> 條以外的任何內容**」。**重派前先刪該段舊 sidecar：`rm -f <工作目錄>/_seg_<N>_uncertain.json`**（防上一輪殘留的可疑名詞清單被 Step 2d 誤採；hash 綁定是第二道保險）。重派完成後重跑合併腳本。
+   **exit 2 時的處理**：對每個 failed segment 按 `reasons` 組裝提示後重派校正 subagent（同一段、同樣的 prompt）。含 `ratio` 時，在 prompt「重要」清單最前面追加：「**上一輪輸出只有 <output> 條（原始 <input> 條），嚴重過度合併。這次必須逐條校正，輸出條數 ≥ <input×0.9> 條**」；含 `zero_duration` 時追加：「**上一輪輸出含捏造/零時長時間軸（例：<zero_dur_examples>），這次必須沿用原始每條時間軸，禁止細分或位移**」；含 `dup_text` 時追加：「**上一輪把其他位置的內容複製進本段造成重複（例：<dup_examples>），這次嚴禁輸出原始 <input> 條以外的任何內容**」；含 `receipt` 時追加：「**上一輪沒有讀完全部提示檔（缺 <receipt_missing> 個驗證碼），這次每個檔都要讀到最後一行的驗證碼，再寫回條**」——這一段的校正結果是在規則不完整下做的，整段重做，不要只補回條。**重派前先刪該段舊 sidecar 與回條：`rm -f <工作目錄>/_seg_<N>_uncertain.json <工作目錄>/_seg_<N>_receipt.txt`**（防上一輪殘留的可疑名詞清單被 Step 2d 誤採；hash 綁定是第二道保險）。重派完成後重跑合併腳本。
 
 #### Step 2c: 複查 pass + 後處理
 
 > **同樣遵守 Context 節約原則**：提取未變動條目、組裝複查 prompt 全部用 Python 腳本在 disk 上完成。
 
-1. **用 Python 腳本提取未變動條目 + 組裝複查 prompt**：
+1. **跑 `srt_prepare_review.py` 提取未變動條目 + 組裝複查 prompt**（2026-10-09 起取代原本的 inline python，提示文字一字未改；術語同 Step 2b 拆檔＋驗證碼）：
 
-   ```python
-   python3 -c "
-   import re, os, difflib
-
-   WORK_DIR = '<工作目錄>'
-   CORRECT_DIR = '${CORRECT_DIR}'
-   TERMS = '${TERMS}'
-   PREPROCESSED = '<preprocessed SRT 路徑>'
-   CORRECTED_RAW = '<_2b_corrected.srt 路徑>'
-   SLIDE_TERMS = '<與 Step 2b --slide-terms 同一個檔，沒有就留空字串>'
-
-   # 解析 SRT 為 {timecode: text} 字典
-   def parse_srt(path):
-       blocks = re.split(r'\n\n+', open(path).read().strip())
-       result = {}
-       for b in blocks:
-           lines = b.strip().split('\n')
-           if len(lines) >= 2 and '-->' in lines[1]:
-               tc = lines[1].strip()
-               text = '\n'.join(lines[2:])
-               result[tc] = text
-       return result, blocks
-
-   pre_dict, _ = parse_srt(PREPROCESSED)
-   cor_dict, cor_blocks = parse_srt(CORRECTED_RAW)
-
-   # 找未變動條目
-   unchanged = []
-   for b in cor_blocks:
-       lines = b.strip().split('\n')
-       if len(lines) >= 2 and '-->' in lines[1]:
-           tc = lines[1].strip()
-           text = '\n'.join(lines[2:])
-           if tc in pre_dict and pre_dict[tc] == text:
-               unchanged.append(b)
-
-   # 找修正範例（前 10 個代表性修正）
-   examples = []
-   for tc, pre_text in pre_dict.items():
-       if tc in cor_dict and pre_dict[tc] != cor_dict[tc]:
-           examples.append(f'{pre_text} → {cor_dict[tc]}')
-           if len(examples) >= 10:
-               break
-
-   # 組裝複查 prompt
-   # 講者術語表在前、本集投影片術語追加在後（與 Step 2b 同一組裝方式）
-   terms = open(TERMS).read()
-   if SLIDE_TERMS and os.path.exists(SLIDE_TERMS):
-       terms += '\n\n## 本集投影片術語\n' + open(SLIDE_TERMS).read()
-   review_prompt = f'''你是字幕複查員。以下字幕已經過一輪 ASR 校正但未被修改。
-請逐條檢查是否有殘留的 ASR 錯誤。
-
-## 術語表
-{terms}
-
-## 第一輪已發現的錯誤範例（供校準判斷標準）
-''' + '\n'.join(examples) + '''
-
-## 重點檢查項目
-- 同音字/近音字錯誤（如「機點」應為「基點」、「教育日」應為「交易日」）
-- 術語表中的詞被 ASR 聽成別的詞
-- 英文辨識錯誤（大小寫、拼寫）
-- 重複字詞未清理
-
-## 不要改的
-- 專有名詞、人名、地名、作品名、時事用語 — 即使你不認識也不要改，講者可能在引用你不知道的時事、作品、流行語
-- 語意通順、在上下文中說得通的條目
-
-## 輸出格式（嚴格）
-只輸出需要修改的條目，格式：
-原始時間軸
-校正後文字
-
-**絕對禁止**：
-- 輸出判斷說明，例如 `[通順，不改]`、`[備註：...]`、`[確認：...]`、`→`、「原文通順」、「不改」、「請確認語境」、「應是...」、「若上條...」、「但後文...」
-- 輸出多行判斷邏輯（一條目對應一行純字幕，禁止把推理過程當字幕第二行）
-- 輸出未閉合的引號、括號或方括號（`「`、`[` 必須在同一行完成配對）
-- 輸出「無修改」「OK」這類佔位文字
-
-如果該條目沒問題，**完全不輸出**（連時間軸都不要列）。
-「校正後文字」必須是純字幕內容，不含任何符號標記、推理文字或內部判斷。
-'''
-
-   with open(f'{WORK_DIR}/_review_prompt.txt', 'w') as f:
-       f.write(review_prompt)
-
-   # 切分未變動條目為段落
-   SEG_SIZE = 300
-   for i in range(0, len(unchanged), SEG_SIZE):
-       seg = unchanged[i:i+SEG_SIZE]
-       with open(f'{WORK_DIR}/_review_seg_{i//SEG_SIZE}.srt', 'w') as f:
-           f.write('\n\n'.join(seg) + '\n')
-
-   n_segs = (len(unchanged) + SEG_SIZE - 1) // SEG_SIZE
-   print(f'Unchanged: {len(unchanged)} entries, split into {n_segs} review segments')
-   print(f'Correction examples: {len(examples)}')
-   "
+   ```bash
+   python3 "${CORRECT_DIR}/srt_prepare_review.py" --workdir "${VIDEO_DIR}" \
+       --preprocessed "<preprocessed SRT 路徑>" --corrected "<_2b_corrected.srt 路徑>" \
+       --terms "${TERMS}" \
+       --slide-terms "<與 Step 2b --slide-terms 同一個檔，沒有就省略>"
    ```
+
+   產出 `_review_prompt.txt`（規則＋第一輪修正範例，開頭是讀取須知）、`_review_terms_1.txt` ~ `_review_terms_K.txt`、
+   `_review_read_codes.json`、`_review_seg_0.srt` ~ `_review_seg_N.srt`（每段 300 條）。
+   stdout JSON：`unchanged`／`review_segments`／`examples`／`prompt_files`／`prompt_tokens`。
+   投影片術語只能追加、不能取代講者術語表（腳本已照這個順序組）。
 
 2. **平行發起複查 subagent**：
 
@@ -693,7 +622,9 @@ done
    ```
    你是字幕複查 subagent。請完成以下步驟：
 
-   1. 用 Read 工具讀取複查 prompt：<工作目錄>/_review_prompt.txt
+   1. 用 Read 工具讀取複查 prompt：<工作目錄>/_review_prompt.txt，再照它開頭「讀取須知」列出的每個檔逐一讀完
+      （_review_terms_1.txt …）。被截斷就用 offset/limit 分段讀到看見驗證碼。
+      全部讀完後，把每個檔的驗證碼依序一行一個，用 Write 寫進 <工作目錄>/_review_seg_<N>_receipt.txt
    2. 用 Read 工具讀取待複查字幕：<工作目錄>/_review_seg_<N>.srt
    3. 依照 prompt 規則逐條檢查
    4. 用 Write 工具把需要修改的條目寫入：<工作目錄>/_review_seg_<N>_fixes.txt
@@ -705,13 +636,23 @@ done
 
    複查同樣派出後開監看：`--pattern '_review_seg_{n}_fixes.txt'`（寫 `NO_FIXES` 也算到齊），marker 用另一個 `.review.launch`。
 
+   到齊後、套用修正之前**先驗回條**（缺碼的段＝沒讀完全部提示，`NO_FIXES` 也不可信）：
+
+   ```bash
+   python3 "${CORRECT_DIR}/srt_prompt_files.py" check --workdir "${VIDEO_DIR}" \
+       --codes _review_read_codes.json --pattern '_review_seg_{n}_receipt.txt' --segments 0-<N-1>
+   ```
+
+   exit 0 才往下；exit 3 時 `missing` 列出的段先 `rm -f` 該段 `_fixes.txt` 與 `_receipt.txt`，在 prompt 最前面追加「上一輪沒有讀完全部提示檔，這次每個檔都要讀到最後一行的驗證碼」後重派，再驗一次。
+
 #### Step 2c 替代路徑：本地 LLM（--local 模式）
 
 ```bash
+python3 -c "import json; d='${WORK_DIR}'; print(''.join(open(f'{d}/{n}',encoding='utf-8').read() for n in json.load(open(f'{d}/_review_read_codes.json'))['files']))" > "${WORK_DIR}/_review_prompt_local.txt"
 for review_file in "${WORK_DIR}"/_review_seg_*.srt; do
     N=$(echo "$review_file" | grep -oP '_review_seg_\K\d+')
     python3 "$OLLAMA_LLM" \
-        --system "${WORK_DIR}/_review_prompt.txt" \
+        --system "${WORK_DIR}/_review_prompt_local.txt" \
         --user "$review_file" \
         --output "${WORK_DIR}/_review_seg_${N}_fixes.txt" \
         --max-tokens 4096
@@ -849,6 +790,8 @@ find "${VIDEO_DIR}" -maxdepth 1 \( \
     -name "_seg_*.srt" -o -name "_ctx_*.txt" \
     -o -name "_vv_ref_*.txt" -o -name "_caption_ref_*.txt" \
     -o -name "_review_seg_*" -o -name "_system_prompt.txt" -o -name "_review_prompt.txt" \
+    -o -name "_terms_*.txt" -o -name "_review_terms_*.txt" -o -name "_seg_*_receipt.txt" \
+    -o -name "_read_codes.json" -o -name "_review_read_codes.json" -o -name "_*_local.txt" -o -name "_user_*.txt" \
     -o -name "*_vvpart*" \
     -o -name "*_vv_part*" -o -name "*_part*_vibevoice.json" \
     -o -name "*_part[0-9].wav" -o -name "*_benchmark.txt" \

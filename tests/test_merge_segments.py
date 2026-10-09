@@ -491,3 +491,32 @@ def test_cross_duplicate_adjacent_patch_entries_are_not_same_segment_exempt(tmp_
     metrics = json.loads(proc.stdout)
     assert metrics["patched"] == 2
     assert metrics["cross_dup_count"] == 1
+
+
+def test_gate_fails_segment_without_full_read_receipt(tmp_path):
+    blocks = [block(1, 0, 2, "第一句"), block(2, 3, 5, "第二句")]
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    preprocessed = tmp_path / "pre.srt"
+    write_srt(preprocessed, blocks)
+    for n in (0, 1):
+        write_srt(workdir / f"_seg_{n}.srt", [blocks[n]])
+        write_srt(workdir / f"_seg_{n}_corrected.srt", [blocks[n]])
+    (workdir / "_read_codes.json").write_text(
+        json.dumps({"files": ["_system_prompt.txt", "_terms_1.txt"], "codes": ["aaaa1111", "bbbb2222"]}),
+        encoding="utf-8",
+    )
+    (workdir / "_seg_0_receipt.txt").write_text("aaaa1111\nbbbb2222\n", encoding="utf-8")
+    (workdir / "_seg_1_receipt.txt").write_text("aaaa1111\n", encoding="utf-8")
+
+    proc = run_merge(workdir, preprocessed, tmp_path / "out.srt")
+
+    assert proc.returncode == 2
+    failed = json.loads(proc.stdout)["failed_segments"]
+    assert [(f["n"], f["reasons"], f["receipt_missing"]) for f in failed] == [(1, ["receipt"], 1)]
+
+
+def test_gate_skips_receipt_check_without_codes_file(tmp_path):
+    blocks = [block(1, 0, 2, "第一句")]
+    proc, output = run_single_segment(tmp_path, blocks, blocks)
+    assert proc.returncode == 0

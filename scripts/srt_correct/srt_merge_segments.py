@@ -10,6 +10,8 @@ from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from srt_prompt_files import check_receipts
+
 
 TS_RE = re.compile(
     r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})"
@@ -118,6 +120,12 @@ def gate_segments(args, corrected_files):
     failed = []
     warned = []
     per_segment = []
+    receipt_missing = {}
+    if (Path(args.workdir) / "_read_codes.json").exists():
+        segment_ids = [int(re.search(r"_seg_(\d+)_corrected\.srt$", f).group(1)) for f in corrected_files]
+        receipt_missing = check_receipts(
+            args.workdir, "_read_codes.json", "_seg_{n}_receipt.txt", segment_ids
+        )
 
     for corrected_path in corrected_files:
         match = re.search(r"_seg_(\d+)_corrected\.srt$", corrected_path)
@@ -176,6 +184,10 @@ def gate_segments(args, corrected_files):
         ):
             reasons.append("dup_text")
             item["dup_examples"] = [text for text, _ in new_dups[:5]]
+
+        if n in receipt_missing:
+            reasons.append("receipt")
+            item["receipt_missing"] = receipt_missing[n]
 
         if reasons:
             item["reasons"] = reasons

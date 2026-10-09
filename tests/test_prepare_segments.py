@@ -80,7 +80,12 @@ def test_prepare_segments_writes_segments_context_vv_and_prompt(tmp_path):
     assert "Beta reference" in (workdir / "_vv_ref_1.txt").read_text(encoding="utf-8")
     assert (workdir / "_vv_ref_2.txt").read_text(encoding="utf-8") == "NO_VV_REFERENCE"
     system_prompt = (workdir / "_system_prompt.txt").read_text(encoding="utf-8")
-    assert "MOAT" in system_prompt
+    assert system_prompt.count("MOAT") == 1  # 只剩 VV 規則裡那一處，術語表不在主檔
+    assert "_terms_1.txt" in system_prompt
+    assert "MOAT" in (workdir / "_terms_1.txt").read_text(encoding="utf-8")
+    assert metrics["prompt_files"] == ["_system_prompt.txt", "_terms_1.txt"]
+    codes = json.loads((workdir / "_read_codes.json").read_text(encoding="utf-8"))["codes"]
+    assert system_prompt.rstrip().endswith(codes[0])
     assert "## 交叉參考：VibeVoice ASR" in system_prompt
 
 
@@ -133,3 +138,28 @@ def test_prepare_segments_writes_caption_reference(tmp_path):
     assert "術語: NVDA" in cap_ref
     assert (workdir / "_caption_ref_1.txt").read_text(encoding="utf-8") == "NO_CAPTIONS"
     assert "## 畫面截圖描述（帶時間戳）" in (workdir / "_system_prompt.txt").read_text(encoding="utf-8")
+
+
+def test_prompt_files_split_terms_and_keep_rules_whole(tmp_path):
+    sys.path.insert(0, str(ROOT / "scripts" / "srt_correct"))
+    import srt_prompt_files as pf
+
+    rules = "RULES-HEAD\n{{TERMINOLOGY_SECTION}}## 禁止事項\nRULES-TAIL\n"
+    terms = "".join(f"術語{i}\n" for i in range(30))
+    names, tokens = pf.write_prompt_files(
+        tmp_path, "_system_prompt.txt", rules, terms, "_terms",
+        "_seg_<N>_receipt.txt", "_read_codes.json", 10, len,
+    )
+
+    assert names[0] == "_system_prompt.txt" and len(names) > 2
+    main = (tmp_path / "_system_prompt.txt").read_text(encoding="utf-8")
+    assert "RULES-HEAD" in main and "RULES-TAIL" in main and "術語0" not in main
+    joined = "".join((tmp_path / n).read_text(encoding="utf-8") for n in names[1:])
+    assert all(f"術語{i}\n" in joined for i in range(30))
+    codes = json.loads((tmp_path / "_read_codes.json").read_text(encoding="utf-8"))["codes"]
+    for name, code in zip(names, codes):
+        assert (tmp_path / name).read_text(encoding="utf-8").rstrip().endswith(code)
+
+    (tmp_path / "_seg_0_receipt.txt").write_text("\n".join(codes), encoding="utf-8")
+    (tmp_path / "_seg_1_receipt.txt").write_text("\n".join(codes[:-1]), encoding="utf-8")
+    assert pf.check_receipts(tmp_path, "_read_codes.json", "_seg_{n}_receipt.txt", [0, 1, 2]) == {1: 1, 2: len(codes)}

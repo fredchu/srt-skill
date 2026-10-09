@@ -15,5 +15,10 @@ _caption_ref_*.txt
 _review_seg_*
 _system_prompt.txt
 _review_prompt.txt
+_terms_*.txt
+_review_terms_*.txt
+_seg_*_receipt.txt
+_read_codes.json
+_review_read_codes.json
 # codex-dispatch run artifacts
 .codex-dispatch/

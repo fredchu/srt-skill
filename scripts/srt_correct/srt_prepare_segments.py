@@ -8,6 +8,8 @@ import re
 import sys
 from pathlib import Path
 
+from srt_prompt_files import DEFAULT_MAX_TOKENS, write_prompt_files
+
 
 _TOKEN_ENCODER = None
 _TOKENIZER = None
@@ -207,15 +209,16 @@ def extract_caption_reference(captions, seg_start_ms, seg_end_ms):
 
 
 def build_system_prompt(prompt_template, terms, slide_terms, has_vv, has_captions):
+    """Return (rules, term_section). Rules keep {{TERMINOLOGY_SECTION}}; terms go to _terms_K files."""
     term_section = terms
     if slide_terms:
         term_section += "\n\n## 本集投影片術語\n" + slide_terms
-    system_prompt = prompt_template.replace("{{TERMINOLOGY_SECTION}}", term_section)
+    rules = prompt_template
     if has_vv:
-        system_prompt += VV_SECTION
+        rules += VV_SECTION
     if has_captions:
-        system_prompt += CAPTION_SECTION
-    return system_prompt
+        rules += CAPTION_SECTION
+    return rules, term_section
 
 
 def write_segment_files(workdir, segments, vv_segments, captions):
@@ -265,10 +268,14 @@ def prepare(args):
     vv_segments = read_json_list(args.vv_json)
     captions = read_json_list(args.captions_json)
 
-    system_prompt = build_system_prompt(
+    rules, term_section = build_system_prompt(
         prompt_template, terms, slide_terms, bool(vv_segments), bool(captions)
     )
-    (workdir / "_system_prompt.txt").write_text(system_prompt, encoding="utf-8")
+    prompt_files, prompt_tokens = write_prompt_files(
+        workdir, "_system_prompt.txt", rules, term_section, "_terms",
+        "_seg_<N>_receipt.txt（<N> 是你負責的段號）", "_read_codes.json",
+        args.prompt_max_tokens, estimate_tokens,
+    )
 
     blocks = split_blocks(Path(args.preprocessed).read_text(encoding="utf-8"))
     block_tokens = [estimate_tokens(block + "\n\n") for block in blocks]
@@ -295,6 +302,8 @@ def prepare(args):
         "segment_tokens": segment_tokens,
         "vv_segments": len(vv_segments),
         "captions": len(captions),
+        "prompt_files": prompt_files,
+        "prompt_tokens": prompt_tokens,
     }
 
 
@@ -310,6 +319,8 @@ def main():
     parser.add_argument("--seg-size", type=int, default=None)
     parser.add_argument("--max-tokens", type=int, default=8000)
     parser.add_argument("--max-entries", type=int, default=200)
+    parser.add_argument("--prompt-max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+                        help="每個提示檔的 token 上限（Read 單次約 25K 就截斷）")
     args = parser.parse_args()
     print(json.dumps(prepare(args), ensure_ascii=False))
 
