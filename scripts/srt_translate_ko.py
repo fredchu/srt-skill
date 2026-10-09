@@ -193,6 +193,10 @@ def cmd_assemble(args):
         if len(ls) > 2: qc["lines3"].append(c["i"])
         if max(len(l) for l in ls) > MAX_LINE: qc["line_len"].append((max(len(l) for l in ls), c["i"], t.replace("\n", "|")))
     Path(args.out).write_text("\n".join(lines), encoding="utf-8")
+    out = Path(args.out)
+    bi = out.with_name(out.stem.removesuffix("_ko") + "_中韓對照.txt")
+    bi.write_text("\n\n".join(f"{c['start'][:8]}\n{c['zh']}\n{' '.join(ko[c['i']].split(chr(10)))}"
+                              for c in cues) + "\n", encoding="utf-8")
     rep = [f"總條數 {len(cues)}",
            f"空白 {len(qc['empty'])}  漢字外漏 {len(qc['cjk'])}  全形標點 {len(qc['fw'])}  超過兩行 {len(qc['lines3'])}",
            f"語速 >{MAX_CPS:.0f} 字/秒：{len(qc['cps'])} 條", *[f"  {x}" for x in sorted(qc["cps"], reverse=True)[:15]],

@@ -131,7 +131,7 @@ ${SUBTITLE_DIR}/
 - **韓文字幕**：用戶說「翻成韓文」「韓文字幕」→ 拿校正完的 `_2c_final.srt` 跑
   `scripts/srt_translate_ko.py run <srt> --out-dir <dir>/ko --glossary "$SRT_KO_TERMS"`，再 `assemble` 組回。
   走 `claude -p`（訂閱額度）、每批 80 條帶前後文 6 條、4 批並行，1541 條約 10 分鐘。時間軸不動，
-  模型可在相鄰條之間搬內容（韓文動詞在句尾）。完成後回報 `.qc.txt` 五項計數，並提醒沒有韓文母語者把關。
+  模型可在相鄰條之間搬內容（韓文動詞在句尾）。`assemble` 同時產出 `<名稱>_中韓對照.txt`（每條：時間 HH:MM:SS／中文／韓文，條間空一行；2026-10-09 起內建，之前是手做、技術分析-9月-01 漏給被用戶抓到），交付時韓文字幕與對照檔一起給。完成後回報 `.qc.txt` 五項計數，並提醒沒有韓文母語者把關。手修韓文字幕時，要連 `ko/batch_*.json` 一起改，否則重跑 `assemble` 會把修正蓋回去。
   術語表 `SRT_KO_TERMS`（中<TAB>韓<TAB>備註）因人而異不進 repo；Austin 的在 For_Claude `scripts/subtitle/srt_correct/terms_austin_ko.txt`。
 - **LLM 模式**：預設 Sonnet subagent（雲端）。用戶提到 `--local` / 「用本地」/ 「離線」→ 用 Ollama gemma4:26b。需要 Ollama 已啟動且 gemma4:26b 已拉取
 
