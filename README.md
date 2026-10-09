@@ -16,7 +16,7 @@ Give it a YouTube link or a local video/audio file. It runs a fully-automated pi
 ```
 YouTube link OR local video/audio
   ↓ Step 0  (YouTube only)  yt-dlp download
-  ↓ Step 0.5 (optional)     slide/frame caption extraction for visual context
+  ↓ Step 0.5                frame OCR for every video + slide-deck terms when given
   ↓ Step 1                  ASR  (Breeze / Whisper)
   ↓ Step 1'                 VibeVoice ASR (optional)  — run AFTER Step 1, not in parallel
                             (both extract to the same <video>.wav; see note below)
@@ -31,7 +31,9 @@ YouTube link OR local video/audio
 
 Design highlights:
 - **Two-ASR cross-reference** — a primary ASR plus an optional VibeVoice pass; the LLM uses both to fix English terms and homophones. Run them **sequentially**: both extract audio to the same `<video>.wav`, and Step 1's cleanup deletes it, so running them at once can feed the primary ASR a truncated wav or leave VibeVoice with a missing file. Independent wav filenames are the real fix and are not implemented yet.
-- **Two-layer slide extraction** — a `.pptx` or `.pdf` input is read on both layers: the embedded text (OOXML, or the PDF text layer via Poppler `pdftotext`) *and* the pixels (embedded images, or every PDF page rendered with `pdftoppm`). Chart screenshots routinely carry tickers and indicator names that appear nowhere in the XML, so text-only extraction misses them silently. OCR failure degrades to a warning — term extraction never hard-fails on it.
+- **Two-layer slide extraction** — a `.pptx` or `.pdf` input is read on both layers: the embedded text (OOXML, or the PDF text layer via Poppler `pdftotext`) *and* the pixels (embedded images, or every PDF page rendered with `pdftoppm`). Chart screenshots routinely carry tickers and indicator names that appear nowhere in the XML, so text-only extraction misses them silently. OCR failure degrades to a warning — term extraction never hard-fails on it. Lines with no letters or CJK characters (chart price/date ticks, page numbers) are dropped on both layers; a real deck went 618 → 375 lines. Frame OCR still runs for every video even when a deck is given — the deck has no timestamps, the frames do.
+- **Curated slide terms reuse** — one deck often spans several episodes. Save a hand-curated term list as `<deck sha256[:12]>_<series>.txt` in `SRT_SLIDE_CURATED_DIR`; the extractor matches the same deck by content hash (renames don't matter) and, when no deck is given at all, by series name as a `-`-bounded prefix of the video title.
+- **No silent prompt truncation** — the Read tool silently truncates around 25K tokens. Rules + glossary + slide terms once reached ~32K and every correction subagent lost the rules placed after the glossary while the merge gate still passed. Now rules stay in the main prompt file, terms are split into ≤12K-token files, each file ends with a random read code, subagents write the codes to a receipt, and the merge gate (and the Step 2c check) fails any segment whose receipt is incomplete.
 - **Structural quality gate** — the merge step rejects over-merged segments and auto-retries.
 - **Fail-loud ASR** — if the ASR step yields an empty/0-byte SRT (a known `mlx_whisper` `KeyError: 'words'` writer bug that discards output despite a successful transcription), the pipeline reconstructs the SRT from the captured verbose stdout, or hard-fails — it never silently reports success on an empty subtitle.
 - **Patch-region disclosure** — spans repaired by hallucination auto-fix or the Whisper fallback (clip-extract, re-transcribe, offset-and-stitch) are the highest timestamp-risk parts of the output, and whole-region drift is invisible to structural validation; the completion report lists each patched span and explicitly asks for a manual playback check. The Whisper fallback also passes `--word-timestamps` by default (word-level alignment re-times segment boundaries, eliminating a measured 2-4 s drift).
@@ -77,6 +79,7 @@ All user-specific paths default to `$HOME` conventions and can be overridden wit
 | `SRT_DATA_DIR` | `$HOME/Documents/For_Claude/scripts/subtitle` | private glossary + media output (kept out of this repo) |
 | `SRT_TERMS` | `$SRT_DATA_DIR/srt_correct/terms_austin_v2.txt` | your terminology file |
 | `SRT_VV_SCRIPT` | `$HOME/dev/vibevoice-poc/vibevoice_asr.py` | the optional VibeVoice ASR script |
+| `SRT_SLIDE_CURATED_DIR` | unset (SKILL passes `$SRT_DATA_DIR/srt_correct/slide_terms_curated`) | hand-curated slide term lists reused across episodes of the same deck |
 | `SRT_ASR_ENGINE` | `mlx` | ASR backend: `mlx` (local Apple Silicon), `cloud` (Vast.ai first; falls back to RunPod only when Vast has no usable machine, exit 75), `runpod` (cloud RTX 4090 only) or `vast` (Vast.ai only, cheapest verified RTX 5090 offer). Also settable per-run with `--engine=`. All four ASR paths support cloud, so **a machine without Apple Silicon can run a full episode**. **Default stays local on purpose** — see "Cloud ASR" below |
 
 ### Cloud ASR
@@ -96,7 +99,7 @@ The second row is "does not drop the window", not "more accurate" — on the sam
 
 ### Korean subtitle track (optional)
 
-`scripts/srt_translate_ko.py run <final.srt> --out-dir <dir>/ko --glossary <zh-ko terms>` then `assemble`. Translates the corrected Traditional Chinese `.srt` into a Korean `.srt` for a separate YouTube caption track, keeping the original timing; the model may move text between adjacent cues because Korean is verb-final. Runs through `claude -p` (subscription quota, no API billing). The zh→ko glossary is user-specific, like `SRT_TERMS`.
+`scripts/srt_translate_ko.py run <final.srt> --out-dir <dir>/ko --glossary <zh-ko terms>` then `assemble`. Translates the corrected Traditional Chinese `.srt` into a Korean `.srt` for a separate YouTube caption track, keeping the original timing; the model may move text between adjacent cues because Korean is verb-final. Runs through `claude -p` (subscription quota, no API billing). The zh→ko glossary is user-specific, like `SRT_TERMS`. `assemble` also writes `<name>_中韓對照.txt` (timestamp / Chinese / Korean per cue) for review; when hand-fixing the Korean `.srt`, edit `ko/batch_*.json` too or a re-run of `assemble` will undo the fix.
 
 ### Bring your own glossary
 
@@ -125,7 +128,7 @@ Native MLX ASR does not run on Windows. The Python orchestration/correction pipe
 ```
 YouTube 連結 或 本地影片／音檔
   ↓ Step 0   (僅 YouTube)   yt-dlp 下載
-  ↓ Step 0.5 (選用)         投影片／畫面 caption 擷取，提供視覺語境
+  ↓ Step 0.5                影片一律跑畫面 OCR＋有給投影片時抽術語
   ↓ Step 1                  ASR（Breeze／Whisper）
   ↓ Step 1'                 VibeVoice ASR（選用）— 跑在 Step 1 之後，不可與之並行
                             （兩者抽到同一個 <影片>.wav，見下方說明）
@@ -140,7 +143,9 @@ YouTube 連結 或 本地影片／音檔
 
 設計重點：
 - **雙路 ASR 交叉參考** — 主 ASR 加上選用的 VibeVoice；LLM 用兩者一起修正英文術語與同音字。兩者必須**序列執行**：它們抽到同一個 `<影片>.wav`，而 Step 1 的清理會刪掉它，同時跑可能讓主 ASR 讀到截斷的 wav、或讓 VibeVoice 找不到檔案。根治是各自獨立的 wav 檔名，尚未實作。
-- **投影片雙層抽取** — `.pptx` 與 `.pdf` 輸入都會同時讀兩層：文字層（OOXML，或用 Poppler `pdftotext` 讀 PDF 文字層）**與**像素層（內嵌圖片，或用 `pdftoppm` 把每頁 PDF 畫成圖）。K 線截圖裡常有 XML 完全沒有的 ticker 與指標名，只抽文字會靜默漏掉。OCR 失敗降級為 warning——不會讓術語抽取整個掛掉。
+- **投影片雙層抽取** — `.pptx` 與 `.pdf` 輸入都會同時讀兩層：文字層（OOXML，或用 Poppler `pdftotext` 讀 PDF 文字層）**與**像素層（內嵌圖片，或用 `pdftoppm` 把每頁 PDF 畫成圖）。K 線截圖裡常有 XML 完全沒有的 ticker 與指標名，只抽文字會靜默漏掉。OCR 失敗降級為 warning——不會讓術語抽取整個掛掉。整行沒有英文字母也沒有中文的行（圖表的價格／日期刻度、頁碼）兩層都會丟掉，真實投影片實測 618 → 375 行。有給投影片時，影片的畫面 OCR 照樣要跑——投影片沒有時間點，畫面才有。
+- **精簡版投影片術語沿用** — 一份投影片常跨好幾集。把人工整理的精簡版存成 `<投影片 sha256 前 12 碼>_<系列名>.txt` 放進 `SRT_SLIDE_CURATED_DIR`；同一份投影片按內容指紋命中（改名不影響），連投影片都沒給時，改用「系列名是影片標題開頭、且下一字是 `-`」來找。
+- **提示不再被靜默截斷** — Read 工具單次約 25K token，超過就靜默截斷。規則＋術語表＋投影片術語曾達約 32K，每個校正 subagent 都丟了排在術語表後面的規則，合併 gate 卻照樣通過。現在規則留在主提示檔、術語切成每份 ≤12K token 的檔、每檔末行放隨機讀取驗證碼，subagent 抄進回條，回條不完整的段由合併 gate（以及 Step 2c 的檢查）擋下重派。
 - **結構性品質 gate** — 合併步驟會擋下過度合併的段落並自動重派。
 - **ASR 失敗會出聲** — 若 ASR 步驟產出空／0-byte SRT（mlx_whisper 已知的 `KeyError: 'words'` 寫檔 bug：辨識其實成功卻丟棄輸出），pipeline 會從捕獲的 verbose stdout 重建 SRT，否則直接 hard-fail——絕不對空字幕靜默回報成功。
 - **ASR 補丁區揭露** — 幻覺自動修復與 Whisper fallback 補過的區段（截音檔獨立重跑＋偏移縫合）是全片時間軸風險最高處，整體漂移自動驗證抓不到；完成回報會逐段列出起止時間，明確提醒人工播放抽查。Whisper fallback 並預設帶 `--word-timestamps`（word 對齊重定 segment 邊界，實測消除 2-4 秒漂移）。
@@ -186,6 +191,7 @@ git clone <repo-url> ~/.claude/skills/srt
 | `SRT_DATA_DIR` | `$HOME/Documents/For_Claude/scripts/subtitle` | 私人術語表 + media 產物（不進此 repo） |
 | `SRT_TERMS` | `$SRT_DATA_DIR/srt_correct/terms_austin_v2.txt` | 你的術語檔 |
 | `SRT_VV_SCRIPT` | `$HOME/dev/vibevoice-poc/vibevoice_asr.py` | 選用的 VibeVoice ASR 腳本 |
+| `SRT_SLIDE_CURATED_DIR` | 未設（SKILL 會帶 `$SRT_DATA_DIR/srt_correct/slide_terms_curated`） | 人工整理的精簡版投影片術語，同一份投影片跨集沿用 |
 | `SRT_ASR_ENGINE` | `mlx` | ASR 引擎：`mlx`（本地 Apple Silicon）、`cloud`（Vast 優先，Vast 沒有可用機器、結束碼 75 時才改 RunPod）、`runpod`（只用 RunPod RTX 4090）或 `vast`（只用 Vast.ai，挑最便宜的已驗證 RTX 5090 報價）。也可用 `--engine=` 逐次指定。四條 ASR 路徑都支援雲端，**沒有 Apple Silicon 也能跑完整支**。**預設維持本地是刻意的**——見下方「雲端 ASR」 |
 
 ### 雲端 ASR
@@ -207,7 +213,7 @@ git clone <repo-url> ~/.claude/skills/srt
 
 ### 韓文字幕軌（選用）
 
-`scripts/srt_translate_ko.py run <final.srt> --out-dir <dir>/ko --glossary <中韓術語表>` 再 `assemble`。把校正完的繁中 `.srt` 翻成韓文 `.srt`，給 YouTube 另一條字幕軌用；時間軸不動，模型可在相鄰條之間搬內容（韓文動詞在句尾）。走 `claude -p`（訂閱額度，不走 API 計費）。中韓術語表和 `SRT_TERMS` 一樣因人而異，不隨 repo 發佈。
+`scripts/srt_translate_ko.py run <final.srt> --out-dir <dir>/ko --glossary <中韓術語表>` 再 `assemble`。把校正完的繁中 `.srt` 翻成韓文 `.srt`，給 YouTube 另一條字幕軌用；時間軸不動，模型可在相鄰條之間搬內容（韓文動詞在句尾）。走 `claude -p`（訂閱額度，不走 API 計費）。中韓術語表和 `SRT_TERMS` 一樣因人而異，不隨 repo 發佈。`assemble` 同時產出 `<名稱>_中韓對照.txt`（每條：時間／中文／韓文），方便對照檢查；手修韓文字幕時要連 `ko/batch_*.json` 一起改，否則重跑 `assemble` 會蓋回去。
 
 ### 自備術語表
 
