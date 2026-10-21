@@ -307,7 +307,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(summary, ensure_ascii=False))
         return 0
     finally:
-        cleanup([*part_wavs, *part_srts, *part_jsons])
+        # 不切段時 VV 自己的 JSON 可能就是 output_json（同名），不能刪
+        keep = args.output_json.resolve()
+        cleanup([p for p in [*part_wavs, *part_srts, *part_jsons] if p.resolve() != keep])
 
 
 if __name__ == "__main__":

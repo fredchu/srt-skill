@@ -94,3 +94,28 @@ def test_dry_run_prints_plan_without_vibevoice(tmp_path):
     assert summary["output_json"] == str(output)
     assert summary["plan"]["parts"][0]["dur"] > 0
     assert not output.exists()
+
+
+def test_single_part_keeps_output_json_named_like_part_json(tmp_path, monkeypatch):
+    import vv_longaudio
+
+    media = tmp_path / "talk.mkv"
+    media.write_bytes(b"")
+    terms = tmp_path / "terms.txt"
+    terms.write_text("NVDA\n", encoding="utf-8")
+    output = tmp_path / "talk_vibevoice.json"
+
+    def fake_run(vv_script, wav, terms, terms_max, output_srt, **kwargs):
+        output.write_text(json.dumps([{"start": 0.0, "end": 1.0, "text": "hi"}]), encoding="utf-8")
+
+    monkeypatch.setattr(vv_longaudio, "ffprobe_duration", lambda path: 120.0)
+    monkeypatch.setattr(vv_longaudio, "detect_silence_ends", lambda path: [])
+    monkeypatch.setattr(vv_longaudio, "run_vibevoice", fake_run)
+
+    rc = vv_longaudio.main([
+        str(media), "--terms", str(terms), "--output-json", str(output),
+        "--lock-file", str(tmp_path / "gpu.lock"),
+    ])
+
+    assert rc == 0
+    assert json.loads(output.read_text(encoding="utf-8"))[0]["text"] == "hi"
