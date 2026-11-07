@@ -611,12 +611,13 @@ done
      - `ratio < 0.55` → FAIL（過度合併，如 300→110 事故）
      - `ratio < 0.80` 且該段有條目時長 > 15 秒 → FAIL（合併症狀）
      - `0.55 ≤ ratio < 0.80` 且無時長症狀 → 合併照常，記入 `warn_segments`（破碎句密集區的合法合併）
+     - 相鄰兩條校正字幕以起始時間對回原文，去空白、全／半形標點並轉小寫後，兩條皆至少 4 字、校正文字相似度 ≥ 0.8、原文相似度 < 0.8，且其中一條和自己原文的相似度 < 0.45 → FAIL（reason `neighbor_swap`，`swap_examples` 最多 5 筆起始時間＋校正文字；無對應原文則跳過）。2026-11-07 86 支舊片實測：這個判準抓到的幾乎都是真吃字，已知誤擋 1 對（投資組合-6月-01「默默地加倉／建倉」）。重派後同一對仍被擋，主 session 看過原文確認合法，才加 `--skip-neighbor-swap` 合併
      - 工作目錄有 `_read_codes.json` 時，`_seg_<N>_receipt.txt` 缺任何驗證碼 → FAIL（reason `receipt`，`receipt_missing`＝缺幾個）。本地模式不寫回條，跑合併前先 `rm -f _read_codes.json`
    - gate 全過 → 嚴格 block 驗證、雙行重複修復、時間排序、end-time clamp、coverage check（>15s gap 用 preprocessed 補洞）、重新編號
    - 成功：stdout 印 JSON metrics（entries / patched / per_segment ratio / max_dur_sec / over_12s_count），exit 0
    - gate FAIL：不寫輸出，stdout 印 `{"gate": "fail", "failed_segments": [...]}`，**exit 2**
 
-   **exit 2 時的處理**：對每個 failed segment 按 `reasons` 組裝提示後重派校正 subagent（同一段、同樣的 prompt）。含 `ratio` 時，在 prompt「重要」清單最前面追加：「**上一輪輸出只有 <output> 條（原始 <input> 條），嚴重過度合併。這次必須逐條校正，輸出條數 ≥ <input×0.9> 條**」；含 `zero_duration` 時追加：「**上一輪輸出含捏造/零時長時間軸（例：<zero_dur_examples>），這次必須沿用原始每條時間軸，禁止細分或位移**」；含 `dup_text` 時追加：「**上一輪把其他位置的內容複製進本段造成重複（例：<dup_examples>），這次嚴禁輸出原始 <input> 條以外的任何內容**」；含 `receipt` 時追加：「**上一輪沒有讀完全部提示檔（缺 <receipt_missing> 個驗證碼），這次每個檔都要讀到最後一行的驗證碼，再寫回條**」——這一段的校正結果是在規則不完整下做的，整段重做，不要只補回條。**重派前先刪該段舊 sidecar 與回條：`rm -f <工作目錄>/_seg_<N>_uncertain.json <工作目錄>/_seg_<N>_receipt.txt`**（防上一輪殘留的可疑名詞清單被 Step 2d 誤採；hash 綁定是第二道保險）。重派完成後重跑合併腳本。
+   **exit 2 時的處理**：對每個 failed segment 按 `reasons` 組裝提示後重派校正 subagent（同一段、同樣的 prompt）。含 `ratio` 時，在 prompt「重要」清單最前面追加：「**上一輪輸出只有 <output> 條（原始 <input> 條），嚴重過度合併。這次必須逐條校正，輸出條數 ≥ <input×0.9> 條**」；含 `zero_duration` 時追加：「**上一輪輸出含捏造/零時長時間軸（例：<zero_dur_examples>），這次必須沿用原始每條時間軸，禁止細分或位移**」；含 `dup_text` 時追加：「**上一輪把其他位置的內容複製進本段造成重複（例：<dup_examples>），這次嚴禁輸出原始 <input> 條以外的任何內容**」；含 `neighbor_swap` 時追加：「**上一輪把某條換成相鄰條目的句子（例：<swap_examples>），這次每條只校正該條自己的原文，不可重複前後句**」；含 `receipt` 時追加：「**上一輪沒有讀完全部提示檔（缺 <receipt_missing> 個驗證碼），這次每個檔都要讀到最後一行的驗證碼，再寫回條**」——這一段的校正結果是在規則不完整下做的，整段重做，不要只補回條。**重派前先刪該段舊 sidecar 與回條：`rm -f <工作目錄>/_seg_<N>_uncertain.json <工作目錄>/_seg_<N>_receipt.txt`**（防上一輪殘留的可疑名詞清單被 Step 2d 誤採；hash 綁定是第二道保險）。重派完成後重跑合併腳本。
 
 #### Step 2c: 複查 pass + 後處理
 

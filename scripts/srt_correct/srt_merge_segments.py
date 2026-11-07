@@ -6,6 +6,7 @@ import glob
 import json
 import re
 import sys
+import unicodedata
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -111,6 +112,47 @@ def dup_keys(entries, min_chars):
     }
 
 
+SWAP_MIN_CHARS = 4
+SWAP_MAX_OWN_SIMILARITY = 0.45
+
+
+def neighbor_swap_examples(input_entries, output_entries, min_chars=SWAP_MIN_CHARS):
+    def normalize(text):
+        return "".join(
+            char for char in text
+            if not char.isspace() and not unicodedata.category(char).startswith("P")
+        ).lower()
+
+    originals = {
+        entry["start_ms"]: normalize(entry_text(entry)) for entry in input_entries
+    }
+    examples = []
+    for left, right in zip(output_entries, output_entries[1:]):
+        if left["start_ms"] not in originals or right["start_ms"] not in originals:
+            continue
+        left_text = normalize(entry_text(left))
+        right_text = normalize(entry_text(right))
+        left_original = originals[left["start_ms"]]
+        right_original = originals[right["start_ms"]]
+        if (
+            len(left_text) >= min_chars
+            and len(right_text) >= min_chars
+            and SequenceMatcher(None, left_text, right_text).ratio() >= 0.8
+            and SequenceMatcher(None, left_original, right_original).ratio() < 0.8
+            and min(
+                SequenceMatcher(None, left_text, left_original).ratio(),
+                SequenceMatcher(None, right_text, right_original).ratio(),
+            ) < SWAP_MAX_OWN_SIMILARITY
+        ):
+            for entry in (left, right):
+                example = f"{ms_to_ts(entry['start_ms'])} {entry_text(entry)}"
+                if example not in examples:
+                    examples.append(example)
+            if len(examples) >= 5:
+                break
+    return examples[:5]
+
+
 def collect_corrected_files(workdir):
     files = glob.glob(str(Path(workdir) / "_seg_*_corrected.srt"))
     return sorted(files, key=lambda f: int(re.search(r"_seg_(\d+)", f).group(1)))
@@ -184,6 +226,14 @@ def gate_segments(args, corrected_files):
         ):
             reasons.append("dup_text")
             item["dup_examples"] = [text for text, _ in new_dups[:5]]
+
+        swap_examples = (
+            [] if args.skip_neighbor_swap
+            else neighbor_swap_examples(input_entries, output_entries)
+        )
+        if swap_examples:
+            reasons.append("neighbor_swap")
+            item["swap_examples"] = swap_examples
 
         if n in receipt_missing:
             reasons.append("receipt")
@@ -351,6 +401,8 @@ def main():
     parser.add_argument("--gate-ratio-warn", type=float, default=0.80)
     parser.add_argument("--gate-max-dur-sec", type=float, default=15)
     parser.add_argument("--gate-dup-min-chars", type=nonnegative, default=10)
+    parser.add_argument("--skip-neighbor-swap", action="store_true",
+                        help="主 session 看過原文、確認被擋的相鄰條目是合法改動時才用")
     parser.add_argument("--gate-dup-min-texts", type=positive, default=2)
     sys.exit(merge(parser.parse_args()))
 

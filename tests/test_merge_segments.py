@@ -239,6 +239,63 @@ def test_gate_allows_adjacent_same_segment_duplicate(tmp_path):
     assert metrics["cross_dup_count"] == 0
 
 
+def test_gate_rejects_neighbor_swap_from_real_incident(tmp_path):
+    corrected = "他反而錯過後面，這個很多散戶是這樣子"
+    proc, output = run_single_segment(
+        tmp_path,
+        [
+            block(1, 0, 2, "他反而錯過後面這個很多散戶是這樣子"),
+            block(2, 2, 4, "我一直講"),
+        ],
+        [block(1, 0, 2, corrected), block(2, 2, 4, corrected)],
+    )
+
+    assert proc.returncode == 2
+    item = json.loads(proc.stdout)["failed_segments"][0]
+    assert item["reasons"] == ["neighbor_swap"]
+    assert item["swap_examples"] == [
+        f"00:00:00,000 {corrected}", f"00:00:02,000 {corrected}",
+    ]
+    assert not output.exists()
+
+
+def test_gate_allows_neighbor_absorption(tmp_path):
+    # Keep the segment above the existing ratio gate while absorbing one cue.
+    unchanged = [block(3, 4, 6, "後續說明"), block(4, 6, 8, "最後結語")]
+    proc, output = run_single_segment(
+        tmp_path,
+        [block(1, 0, 2, "那"), block(2, 2, 4, "就不要去賭或者是說要賭")] + unchanged,
+        [block(1, 0, 4, "那，就不要去賭，或者是說要賭")] + unchanged,
+    )
+
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["gate"] == "pass"
+    assert output.exists()
+
+
+def test_gate_allows_genuine_neighbor_repetition(tmp_path):
+    blocks = [block(1, 0, 2, "真的是苦工"), block(2, 2, 4, "真的是苦工")]
+    proc, output = run_single_segment(
+        tmp_path, blocks, blocks, "--gate-dup-min-chars", "5",
+    )
+
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["gate"] == "pass"
+    assert output.exists()
+
+
+def test_gate_allows_short_corrected_neighbors(tmp_path):
+    proc, output = run_single_segment(
+        tmp_path,
+        [block(1, 0, 2, "那"), block(2, 2, 4, "對")],
+        [block(1, 0, 2, "是的！"), block(2, 2, 4, "是的。")],
+    )
+
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["gate"] == "pass"
+    assert output.exists()
+
+
 def test_gate_allows_duplicate_already_present_in_input(tmp_path):
     duplicate = "講者原本就有重說的完整長句內容"
     blocks = [
@@ -520,3 +577,43 @@ def test_gate_skips_receipt_check_without_codes_file(tmp_path):
     blocks = [block(1, 0, 2, "第一句")]
     proc, output = run_single_segment(tmp_path, blocks, blocks)
     assert proc.returncode == 0
+
+
+def test_gate_rejects_short_neighbor_swap_from_real_incident(tmp_path):
+    proc, _ = run_single_segment(
+        tmp_path,
+        [block(1, 0, 2, "所以當這邊"), block(2, 2, 4, "我們假設今天反過來")],
+        [block(1, 0, 2, "所以當這邊"), block(2, 2, 4, "所以當這邊")],
+    )
+
+    assert proc.returncode == 2
+    assert json.loads(proc.stdout)["failed_segments"][0]["reasons"] == ["neighbor_swap"]
+
+
+def test_gate_allows_repetition_when_asr_garbled_one_side(tmp_path):
+    proc, output = run_single_segment(
+        tmp_path,
+        [
+            block(1, 0, 2, "台積電的資本支出往上修"),
+            block(2, 2, 4, "台積電資本主管要求"),
+        ],
+        [
+            block(1, 0, 2, "台積電的資本支出往上修"),
+            block(2, 2, 4, "台積電資本支出上修"),
+        ],
+    )
+
+    assert proc.returncode == 0
+    assert output.exists()
+
+
+def test_skip_neighbor_swap_flag_bypasses_only_this_gate(tmp_path):
+    proc, output = run_single_segment(
+        tmp_path,
+        [block(1, 0, 2, "默默的加強"), block(2, 2, 4, "默默的減長")],
+        [block(1, 0, 2, "默默地加倉"), block(2, 2, 4, "默默地建倉")],
+        "--skip-neighbor-swap",
+    )
+
+    assert proc.returncode == 0
+    assert output.exists()
