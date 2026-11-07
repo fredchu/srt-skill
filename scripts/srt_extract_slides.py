@@ -716,9 +716,10 @@ def find_curated_by_title(title: str, curated_dir: str | None) -> str | None:
     """
     if not curated_dir:
         return None
+    title = "".join(title.split())
     best, best_len = None, -1
     for path in sorted(glob.glob(os.path.join(glob.escape(curated_dir), "*_*.txt"))):
-        series = os.path.basename(path)[:-4].split("_", 1)[1]
+        series = "".join(os.path.basename(path)[:-4].split("_", 1)[1].split())
         if (title == series or title.startswith(series + "-")) and len(series) > best_len:
             best, best_len = path, len(series)
     return best

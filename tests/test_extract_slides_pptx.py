@@ -81,6 +81,28 @@ def test_find_curated_by_title_matches_series_prefix_only(tmp_path):
     assert slides.find_curated_by_title("投資組合-9月-01", str(tmp_path)) is None
 
 
+@pytest.mark.parametrize("title", ["技術分析- 10月-03", "技術分析-\u300010月-03"])
+def test_find_curated_by_title_ignores_whitespace(tmp_path, title):
+    curated = tmp_path / "aaaaaaaaaaaa_技術分析-10月.txt"
+    curated.write_text("x", encoding="utf-8")
+
+    assert slides.find_curated_by_title(title, str(tmp_path)) == str(curated)
+
+
+def test_find_curated_by_title_whitespace_does_not_confuse_months(tmp_path):
+    (tmp_path / "aaaaaaaaaaaa_技術分析-10月.txt").write_text("x", encoding="utf-8")
+
+    assert slides.find_curated_by_title("技術分析- 1月-02", str(tmp_path)) is None
+
+
+def test_find_curated_by_title_ignores_series_whitespace(tmp_path):
+    curated = tmp_path / "aaaaaaaaaaaa_技術分析-\u300010月.txt"
+    curated.write_text("x", encoding="utf-8")
+    (tmp_path / "bbbbbbbbbbbb_技術分析.txt").write_text("x", encoding="utf-8")
+
+    assert slides.find_curated_by_title("技術分析- 10月-03", str(tmp_path)) == str(curated)
+
+
 def test_main_lookup_title_prints_path_or_exits_1(tmp_path, monkeypatch, capsys):
     import sys
 
